@@ -1,8 +1,8 @@
 # Simple Client
 
-A minimal client that sends observations to the server and prints the inference rate.
+一个最小客户端，用于向服务器发送观测并打印推理速率。
 
-You can specify which runtime environment to use using the `--env` flag. You can see the available options by running:
+你可以通过 `--env` 标志指定要使用的运行时环境。运行以下命令即可查看可用选项：
 
 ```bash
 uv run examples/simple_client/main.py --help
@@ -17,13 +17,13 @@ docker compose -f examples/simple_client/compose.yml up --build
 
 ## Without Docker
 
-Terminal window 1:
+终端窗口 1：
 
 ```bash
 uv run examples/simple_client/main.py --env DROID
 ```
 
-Terminal window 2:
+终端窗口 2：
 
 ```bash
 uv run scripts/serve_policy.py --env DROID

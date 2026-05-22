@@ -1,13 +1,13 @@
 # Run Aloha (Real Robot)
 
-This example demonstrates how to run with a real robot using an [ALOHA setup](https://github.com/tonyzhaozh/aloha). See [here](../../docs/remote_inference.md) for instructions on how to load checkpoints and run inference. We list the relevant checkpoint paths for each provided fine-tuned model below.
+本示例演示如何使用 [ALOHA setup](https://github.com/tonyzhaozh/aloha) 在真实机器人上运行。关于如何加载 checkpoint 并运行推理，请参见[这里](../../docs/remote_inference.md)。下面列出了每个已提供微调模型对应的 checkpoint 路径。
 
 ## Prerequisites
 
-This repo uses a fork of the ALOHA repo, with very minor modifications to use Realsense cameras.
+本仓库使用 ALOHA 仓库的一个 fork，只做了很小的修改，以支持 Realsense 相机。
 
-1. Follow the [hardware installation instructions](https://github.com/tonyzhaozh/aloha?tab=readme-ov-file#hardware-installation) in the ALOHA repo.
-1. Modify the `third_party/aloha/aloha_scripts/realsense_publisher.py` file to use serial numbers for your cameras.
+1. 按照 ALOHA 仓库中的[硬件安装说明](https://github.com/tonyzhaozh/aloha?tab=readme-ov-file#hardware-installation)进行操作。
+1. 修改 `third_party/aloha/aloha_scripts/realsense_publisher.py` 文件，为你的相机设置序列号。
 
 ## With Docker
 
@@ -18,7 +18,7 @@ docker compose -f examples/aloha_real/compose.yml up --build
 
 ## Without Docker
 
-Terminal window 1:
+终端窗口 1：
 
 ```bash
 # Create virtual environment
@@ -31,13 +31,13 @@ uv pip install -e packages/openpi-client
 python -m examples.aloha_real.main
 ```
 
-Terminal window 2:
+终端窗口 2：
 
 ```bash
 roslaunch aloha ros_nodes.launch
 ```
 
-Terminal window 3:
+终端窗口 3：
 
 ```bash
 uv run scripts/serve_policy.py --env ALOHA --default_prompt='take the toast out of the toaster'
@@ -46,81 +46,81 @@ uv run scripts/serve_policy.py --env ALOHA --default_prompt='take the toast out 
 ## **ALOHA Checkpoint Guide**
 
 
-The `pi0_base` model can be used in zero shot for a simple task on the ALOHA platform, and we additionally provide two example fine-tuned checkpoints, “fold the towel” and “open the tupperware and put the food on the plate,” which can perform more advanced tasks on the ALOHA.
+`pi0_base` 模型可以在 ALOHA 平台上以 zero shot 方式用于一个简单任务；此外，我们还提供了两个示例微调 checkpoint，分别对应 "fold the towel" 和 "open the tupperware and put the food on the plate"，可在 ALOHA 上执行更高级的任务。
 
-While we’ve found the policies to work in unseen conditions across multiple ALOHA stations, we provide some pointers here on how best to set up scenes to maximize the chance of policy success. We cover the prompts to use for the policies, objects we’ve seen it work well on, and well-represented initial state distributions. Running these policies in zero shot is still a very experimental feature, and there is no guarantee that they will work on your robot. The recommended way to use `pi0_base` is by finetuning with data from the target robot.
+虽然我们发现这些策略可以在多个 ALOHA 工作站的未见过条件下运行，但这里仍提供一些场景设置建议，以尽可能提高策略成功率。我们会说明策略应使用的 prompt、已验证效果较好的物体，以及较充分覆盖的初始状态分布。以 zero shot 方式运行这些策略仍然是非常实验性的功能，不能保证它们一定能在你的机器人上工作。推荐的 `pi0_base` 使用方式是基于目标机器人采集的数据进行微调。
 
 
 ---
 
 ### **Toast Task**
 
-This task involves the robot taking two pieces of toast out of a toaster and placing them on a plate.
+该任务要求机器人从烤面包机中取出两片吐司，并将它们放到盘子上。
 
 - **Checkpoint path**: `gs://openpi-assets/checkpoints/pi0_base`
 - **Prompt**: "take the toast out of the toaster"
-- **Objects needed**: Two pieces of toast, a plate, and a standard toaster.
-- **Object Distribution**:
-  - Works on both real toast and rubber fake toast
-  - Compatible with standard 2-slice toasters
-  - Works with plates of varying colors
+- **所需物体**：两片吐司、一个盘子和一个标准烤面包机。
+- **物体分布**：
+  - 适用于真实吐司和橡胶假吐司
+  - 兼容标准 2 片式烤面包机
+  - 适用于多种颜色的盘子
 
 ### **Scene Setup Guidelines**
 <img width="500" alt="Screenshot 2025-01-31 at 10 06 02 PM" src="https://github.com/user-attachments/assets/3d043d95-9d1c-4dda-9991-e63cae61e02e" />
 
-- The toaster should be positioned in the top-left quadrant of the workspace.
-- Both pieces of toast should start inside the toaster, with at least 1 cm of bread sticking out from the top.
-- The plate should be placed roughly in the lower-center of the workspace.
-- Works with both natural and synthetic lighting, but avoid making the scene too dark (e.g., don't place the setup inside an enclosed space or under a curtain).
+- 烤面包机应放在工作空间的左上象限。
+- 两片吐司的初始位置都应在烤面包机内，并且顶部至少露出 1 cm。
+- 盘子应大致放在工作空间的下方中央。
+- 该策略适用于自然光和人造光，但请避免场景过暗，例如不要把装置放在封闭空间内或帘子下面。
 
 
 ### **Towel Task**
 
-This task involves folding a small towel (e.g., roughly the size of a hand towel) into eighths.
+该任务要求机器人将一块小毛巾（例如大约手巾大小）折成八等份。
 
 - **Checkpoint path**: `gs://openpi-assets/checkpoints/pi0_aloha_towel`
 - **Prompt**: "fold the towel"
-- **Object Distribution**:
-  - Works on towels of varying solid colors
-  - Performance is worse on heavily textured or striped towels
+- **物体分布**：
+  - 适用于多种纯色毛巾
+  - 在纹理很重或带条纹的毛巾上表现较差
 
 ### **Scene Setup Guidelines**
 <img width="500" alt="Screenshot 2025-01-31 at 10 01 15 PM" src="https://github.com/user-attachments/assets/9410090c-467d-4a9c-ac76-96e5b4d00943" />
 
-- The towel should be flattened and roughly centered on the table.
-- Choose a towel that does not blend in with the table surface.
+- 毛巾应摊平，并大致放在桌面中央。
+- 请选择不会与桌面颜色混在一起的毛巾。
 
 
 ### **Tupperware Task**
 
-This task involves opening a tupperware filled with food and pouring the contents onto a plate.
+该任务要求机器人打开装有食物的保鲜盒，并将其中内容倒到盘子上。
 
 - **Checkpoint path**: `gs://openpi-assets/checkpoints/pi0_aloha_tupperware`
 - **Prompt**: "open the tupperware and put the food on the plate"
-- **Objects needed**: Tupperware, food (or food-like items), and a plate.
-- **Object Distribution**:
-  - Works on various types of fake food (e.g., fake chicken nuggets, fries, and fried chicken).
-  - Compatible with tupperware of different lid colors and shapes, with best performance on square tupperware with a corner flap (see images below).
-  - The policy has seen plates of varying solid colors.
+- **所需物体**：保鲜盒、食物（或类似食物的物体）和一个盘子。
+- **物体分布**：
+  - 适用于多种假食物，例如假鸡块、薯条和炸鸡。
+  - 兼容不同盖子颜色和形状的保鲜盒，在带角部翻片的方形保鲜盒上效果最好（见下图）。
+  - 该策略见过多种纯色盘子。
 
 ### **Scene Setup Guidelines**
 <img width="500" alt="Screenshot 2025-01-31 at 10 02 27 PM" src="https://github.com/user-attachments/assets/60fc1de0-2d64-4076-b903-f427e5e9d1bf" />
 
-- Best performance observed when both the tupperware and plate are roughly centered in the workspace.
-- Positioning:
-  - Tupperware should be on the left.
-  - Plate should be on the right or bottom.
-  - The tupperware flap should point toward the plate.
+- 当保鲜盒和盘子都大致位于工作空间中央时，观察到的效果最好。
+- 位置：
+  - 保鲜盒应位于左侧。
+  - 盘子应位于右侧或下方。
+  - 保鲜盒翻片应朝向盘子。
 
 ## Training on your own Aloha dataset
 
-1. Convert the dataset to the LeRobot dataset v2.0 format.
+1. 将数据集转换为 LeRobot 数据集 v2.0 格式。
 
-    We provide a script [convert_aloha_data_to_lerobot.py](./convert_aloha_data_to_lerobot.py) that converts the dataset to the LeRobot dataset v2.0 format. As an example we have converted the `aloha_pen_uncap_diverse_raw` dataset from the [BiPlay repo](https://huggingface.co/datasets/oier-mees/BiPlay/tree/main/aloha_pen_uncap_diverse_raw) and uploaded it to the HuggingFace Hub as [physical-intelligence/aloha_pen_uncap_diverse](https://huggingface.co/datasets/physical-intelligence/aloha_pen_uncap_diverse).
+    我们提供了脚本 [convert_aloha_data_to_lerobot.py](./convert_aloha_data_to_lerobot.py)，用于将数据集转换为 LeRobot 数据集 v2.0 格式。作为示例，我们已经从 [BiPlay repo](https://huggingface.co/datasets/oier-mees/BiPlay/tree/main/aloha_pen_uncap_diverse_raw) 转换了 `aloha_pen_uncap_diverse_raw` 数据集，并将其上传到 HuggingFace Hub，名称为 [physical-intelligence/aloha_pen_uncap_diverse](https://huggingface.co/datasets/physical-intelligence/aloha_pen_uncap_diverse)。
 
 
-2. Define a training config that uses the custom dataset.
+2. 定义一个使用自定义数据集的训练配置。
 
-    We provide the [pi0_aloha_pen_uncap config](../../src/openpi/training/config.py) as an example. You should refer to the root [README](../../README.md) for how to run training with the new config.
+    我们提供了 [pi0_aloha_pen_uncap config](../../src/openpi/training/config.py) 作为示例。关于如何使用新配置运行训练，请参考根目录 [README](../../README.md)。
 
-IMPORTANT: Our base checkpoint includes normalization stats from various common robot configurations. When fine-tuning a base checkpoint with a custom dataset from one of these configurations, we recommend using the corresponding normalization stats provided in the base checkpoint. In the example, this is done by specifying the trossen asset_id and a path to the pretrained checkpoint’s asset directory within the AssetsConfig.
+重要提示：我们的 base checkpoint 包含来自多种常见机器人配置的归一化统计量。当使用这些配置之一的自定义数据集对 base checkpoint 进行微调时，建议使用 base checkpoint 中提供的对应归一化统计量。在该示例中，这是通过在 AssetsConfig 中指定 trossen asset_id 以及预训练 checkpoint 的 assets 目录路径来完成的。

@@ -29,19 +29,20 @@ class EnvMode(enum.Enum):
 class Args:
     """Command line arguments."""
 
-    # Host and port to connect to the server.
+    # 要连接的 policy server host。
     host: str = "0.0.0.0"
-    # Port to connect to the server. If None, the server will use the default port.
+    # 要连接的 policy server port；None 表示使用默认端口。
     port: int | None = 8000
-    # API key to use for the server.
+    # 连接 server 时使用的 API key。
     api_key: str | None = None
-    # Number of steps to run the policy for.
+    # 要执行的 policy 推理轮数。
     num_steps: int = 20
-    # Path to save the timings to a parquet file. (e.g., timing.parquet)
+    # timing 结果保存路径，例如 timing.parquet。
     timing_file: pathlib.Path | None = None
-    # Environment to run the policy in.
+    # 用哪个环境生成测试 observation。
     env: EnvMode = EnvMode.ALOHA_SIM
-    # Use streaming inference (requires StreamingWebsocketPolicyServer).
+    # FASTER: 使用 streaming 推理时，server 必须是 StreamingWebsocketPolicyServer；
+    # 普通 WebsocketPolicyServer 只支持单次 infer/final 响应。
     streaming: bool = False
 
 
@@ -82,10 +83,10 @@ class TimingRecorder:
             title_justify="center",
         )
 
-        # Add metric column with custom styling
+        # timing 表第一列是 metric 名称。
         table.add_column("Metric", style="cyan", justify="left", no_wrap=True)
 
-        # Add statistical columns with consistent styling
+        # 统计列保持固定顺序，便于比较普通 infer、streaming final 和 TTFA 等指标。
         stat_columns = [
             ("Mean", "yellow", "mean"),
             ("Std", "yellow", "std"),
@@ -100,13 +101,13 @@ class TimingRecorder:
         for name, style, _ in stat_columns:
             table.add_column(name, justify="right", style=style, no_wrap=True)
 
-        # Add rows for each metric with formatted values
+        # 每个 metric 输出一行格式化统计值。
         for key in sorted(self._timings.keys()):
             stats = self.get_stats(key)
             values = [f"{stats[key]:.1f}" for _, _, key in stat_columns]
             table.add_row(key, *values)
 
-        # Print with custom console settings
+        # 使用固定 console 设置，避免宽表被截断。
         console = rich.console.Console(width=None, highlight=True)
         console.print(table)
 
@@ -175,6 +176,8 @@ def _run_streaming(policy, obs_fn, args: Args) -> None:
         def on_actions_ready(actions):
             nonlocal first_action_time
             if first_action_time is None:
+                # FASTER: 这里记录 time-to-first-action (TTFA)，它衡量首个 partial ready action 延迟，
+                # 与 final 完整结果耗时分开统计。
                 first_action_time = time.time()
 
         result = policy.infer_streaming(obs_fn(), on_actions_ready=on_actions_ready)

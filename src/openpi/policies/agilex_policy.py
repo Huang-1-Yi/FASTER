@@ -33,8 +33,8 @@ class AgilexInputs(transforms.DataTransformFn):
     - actions: [action_horizon, 14]
     """
 
-    # The expected cameras names. All input cameras must be in this set. Missing cameras will be
-    # replaced with black images and the corresponding `image_mask` will be set to False.
+    # Data contract: 输入 camera 名称必须在该集合内；缺失 camera 用黑图占位，并将对应 image_mask 置 False。
+    # 自定义 Agilex 相机名时，需要同时更新这个集合、repack 映射和下方 extra_image_names。
     EXPECTED_CAMERAS: ClassVar[tuple[str, ...]] = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 
     def __call__(self, data: dict) -> dict:
@@ -44,7 +44,7 @@ class AgilexInputs(transforms.DataTransformFn):
         if set(in_images) - set(self.EXPECTED_CAMERAS):
             raise ValueError(f"Expected images to contain {self.EXPECTED_CAMERAS}, got {tuple(in_images)}")
 
-        # Assume that base image always exists.
+        # Data contract: cam_high 是必选主视角，用来决定缺失 wrist 图像的占位尺寸。
         base_image = in_images["cam_high"]
 
         images = {
@@ -54,7 +54,8 @@ class AgilexInputs(transforms.DataTransformFn):
             "base_0_rgb": np.True_,
         }
 
-        # Add the extra images.
+        # Data contract: wrist 相机可选；缺失时用零图和 False mask 保持 camera slot 稳定。
+        # 模型侧仍看到固定的 left/right wrist slot，避免训练和在线推理的结构不一致。
         extra_image_names = {
             "left_wrist_0_rgb": "cam_left_wrist",
             "right_wrist_0_rgb": "cam_right_wrist",
@@ -67,13 +68,15 @@ class AgilexInputs(transforms.DataTransformFn):
                 images[dest] = np.zeros_like(base_image)
                 image_masks[dest] = np.False_
 
+        # Data contract: Agilex 在这里把 camera dict 和 14-D 双臂 state 映射到 openpi 统一输入键。
         inputs = {
             "image": images,
             "image_mask": image_masks,
             "state": data["state"],
         }
 
-        # Actions are only available during training.
+        # Data contract: actions 只在训练样本中出现，在线推理只提供 observation、prompt 和可选 prefix；
+        # 后续 model transform 会把 14-D action pad 到模型 action_dim。
         if "actions" in data:
             actions = np.asarray(data["actions"])
             inputs["actions"] = actions
@@ -85,6 +88,7 @@ class AgilexInputs(transforms.DataTransformFn):
             inputs["delay"] = data["delay"]
 
         if "action_prefix" in data:
+            # FASTER: action_prefix 原样透传，用于在 denoising 剩余 horizon 时保留已执行/已知动作。
             inputs["action_prefix"] = data["action_prefix"]
 
         return inputs
@@ -95,22 +99,22 @@ class AgilexOutputs(transforms.DataTransformFn):
     """Outputs for the Agilex policy."""
 
     def __call__(self, data: dict) -> dict:
-        # Only return the first 14 dims.
+        # Data contract: Agilex 执行端消费完整 14-D 双臂 action 向量；如果机器人维度变化，这里和 state 契约要一起改。
         actions = np.asarray(data["actions"][:, :14])
         return {"actions": actions}
 
 
 def _decode_agilex(data: dict) -> dict:
-    # state is [left_arm_joint_angles, left_arm_gripper, right_arm_joint_angles, right_arm_gripper]
-    # dim sizes: [6, 1, 6, 1]
+    # Data contract: state 的排列是 [left_arm_joint_angles, left_arm_gripper, right_arm_joint_angles, right_arm_gripper]。
+    # 维度为 [6, 1, 6, 1]。
     state = np.asarray(data["state"])
 
     def convert_image(img):
         img = np.asarray(img)
-        # Convert to uint8 if using float images.
+        # Data contract: float 图像统一转成 uint8。
         if np.issubdtype(img.dtype, np.floating):
             img = (255 * img).astype(np.uint8)
-        # Convert from [channel, height, width] to [height, width, channel].
+        # Data contract: 图像统一从 CHW 转成 HWC。
         return einops.rearrange(img, "c h w -> h w c")
 
     images = data["images"]

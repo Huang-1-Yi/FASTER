@@ -9,7 +9,7 @@ docker compose -f examples/aloha_sim/compose.yml up --build
 
 ## Without Docker
 
-Terminal window 1:
+终端窗口 1：
 
 ```bash
 # Create virtual environment
@@ -22,13 +22,13 @@ uv pip install -e packages/openpi-client
 MUJOCO_GL=egl python examples/aloha_sim/main.py
 ```
 
-Note: If you are seeing EGL errors, you may need to install the following dependencies:
+注意：如果遇到 EGL 错误，你可能需要安装以下依赖：
 
 ```bash
 sudo apt-get install -y libegl1-mesa-dev libgles2-mesa-dev
 ```
 
-Terminal window 2:
+终端窗口 2：
 
 ```bash
 # Run the server

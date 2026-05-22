@@ -61,12 +61,13 @@ class Policy(BasePolicy):
             self._model.eval()
             self._sample_actions = model.sample_actions
         else:
-            # JAX model setup
+            # JAX 模型初始化；sample_actions 被 JIT 后，num_steps/infer_time_schedule/alpha/u0 作为静态参数参与编译缓存。
             self._sample_actions = nnx_utils.module_jit(
                 model.sample_actions, static_argnames=("num_steps", "infer_time_schedule", "alpha", "u0")
             )
 
-            # Explicitly split and JIT the Streaming API to avoid io_callback bottlenecks
+            # FASTER: 只有 Pi0Faster 暴露 init/step streaming API；普通 pi0/pi05 只能走完整 infer。
+            # 显式拆分并 JIT init/step，是为了避免 io_callback 带来的 host-device 同步瓶颈。
             if hasattr(model, "sample_actions_streaming_init"):
                 self._sample_actions_streaming_init = nnx_utils.module_jit(
                     model.sample_actions_streaming_init, static_argnames=("num_steps", "alpha", "u0")
@@ -77,12 +78,14 @@ class Policy(BasePolicy):
 
     @override
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
-        # Make a copy since transformations may modify the inputs in place.
+        # transform 可能原地修改输入，因此先复制一层 tree。
         inputs = jax.tree.map(lambda x: x, obs)
 
         if "action_prefix" in inputs or "delay" in inputs:
+            # FASTER: prefix-conditioned inference 要求 delay 和 action_prefix 同时存在；
+            # delay 表示前多少个 action 已知干净，action_prefix 承载这些值，原始形状是 (delay, action_dim)。
             assert "action_prefix" in inputs and "delay" in inputs, "action_prefix and delay must be present"
-            # action_prefix (delay, action_dim)
+            # FASTER: action_prefix 的第一维长度必须等于 delay；后续 input transform 会 pad 成模型固定 horizon。
             assert (
                 inputs["action_prefix"].shape[0] == inputs["delay"]
             ), f"{inputs['action_prefix'].shape[0]} != {inputs['delay']}"
@@ -93,26 +96,29 @@ class Policy(BasePolicy):
 
         inputs = self._input_transform(inputs)
         if not self._is_pytorch_model:
-            # Make a batch and convert to jax.Array.
+            # JAX 路径需要增加 batch 维并转成 jax.Array。
             inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
             self._rng, sample_rng_or_pytorch_device = jax.random.split(self._rng)
         else:
-            # Convert inputs to PyTorch tensors and move to correct device
+            # PyTorch 路径需要增加 batch 维并移动到目标 device。
             inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device)[None, ...], inputs)
             sample_rng_or_pytorch_device = self._pytorch_device
 
-        # Prepare kwargs for sample_actions
+        # sample_kwargs 汇总推理时传给 sample_actions 的可选控制参数；
+        # 这里复制一份，避免单次 infer 注入 noise/prefix 时污染 Policy 的默认配置。
         sample_kwargs = dict(self._sample_kwargs)
         if noise is not None:
             noise = torch.from_numpy(noise).to(self._pytorch_device) if self._is_pytorch_model else jnp.asarray(noise)
 
-            if noise.ndim == 2:  # If noise is (action_horizon, action_dim), add batch dimension
-                noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)
+            if noise.ndim == 2:  # noise 若是 (action_horizon, action_dim)，需要补 batch 维
+                noise = noise[None, ...]  # 变成 (1, action_horizon, action_dim)
             sample_kwargs["noise"] = noise
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
         if prefix_mode:
+            # FASTER: action_prefix 已经经过 input transform 的 normalize/pad，再传入 sample_actions；
+            # delay 同样带 batch 维，和模型侧 prefix_action_mask 对齐。
             sample_kwargs["delay"] = inputs["delay"]
             sample_kwargs["action_prefix"] = inputs["action_prefix"]
 
@@ -151,6 +157,8 @@ class Policy(BasePolicy):
 
         inputs = jax.tree.map(lambda x: x, obs)
         if "action_prefix" in inputs or "delay" in inputs:
+            # FASTER: streaming 与普通 infer 使用同一套 delay/action_prefix 契约；
+            # 输入 transform 之前仍要求短 prefix 长度等于 delay。
             assert "action_prefix" in inputs and "delay" in inputs, "action_prefix and delay must be present"
             assert (
                 inputs["action_prefix"].shape[0] == inputs["delay"]
@@ -163,12 +171,14 @@ class Policy(BasePolicy):
         inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
         self._rng, sample_rng = jax.random.split(self._rng)
 
+        # FASTER: streaming 固定走模型的 HAS init/step 路径；infer_time_schedule 只对非 streaming sample_actions 生效。
+        # 因此这里显式丢弃 infer_time_schedule，避免把 const/HAS 字符串传给 streaming init。
         sample_kwargs = {k: v for k, v in self._sample_kwargs.items() if k != "infer_time_schedule"}
         if noise is not None:
             noise = jnp.asarray(noise)
 
-            if noise.ndim == 2:  # If noise is (action_horizon, action_dim), add batch dimension
-                noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)
+            if noise.ndim == 2:  # noise 若是 (action_horizon, action_dim)，需要补 batch 维
+                noise = noise[None, ...]  # 变成 (1, action_horizon, action_dim)
             sample_kwargs["noise"] = noise
 
         observation = _model.Observation.from_dict(inputs)
@@ -184,7 +194,8 @@ class Policy(BasePolicy):
         start_time = time.monotonic()
         emitted_action_count = 0
 
-        # Step 1: Pre-compute static data and kv_cache
+        # FASTER: init 预计算静态 observation、KV cache、HAS schedule 和 partial action readiness mask；
+        # 这些结果会被 host loop 逐 step 复用，避免重复编码 prompt/images/state。
         (
             x_t,
             already_output,
@@ -198,7 +209,8 @@ class Policy(BasePolicy):
             observation_preprocessed,
         ) = self._sample_actions_streaming_init(sample_rng, observation, **sample_kwargs)
 
-        # Step 2: High-speed Asynchronous loop
+        # FASTER: host loop 每个 denoising step 检查 newly_ready，并通过 callback 尽早发出 partial actions。
+        # 这段故意留在 Python 侧展开，让 server 能在模型 step 之间发送已 ready 的动作。
         for i in range(num_steps):
             x_next, already_output, newly_ready = self._sample_actions_streaming_step(
                 x_t,
@@ -218,6 +230,8 @@ class Policy(BasePolicy):
             selected_count = newly_ready_count
 
             if early_stop_actions is not None:
+                # FASTER: early_stop_actions 用于实时控制，只取前几个 ready actions，避免等待完整 chunk；
+                # final 输出仍返回当前 x_t，因此调用方可同时记录完整推理状态。
                 remaining = early_stop_actions - emitted_action_count
                 selected_count = min(newly_ready_count, remaining)
                 emitted_action_count += selected_count
@@ -228,6 +242,7 @@ class Policy(BasePolicy):
                 def process_and_send(actions_data, state_data):
                     temp_output = {"state": state_data, "actions": actions_data}
                     temp_output = self._output_transform(temp_output)
+                    # FASTER: callback 收到的是已 unnormalize 且裁剪到环境 action_dim 的 actions。
                     on_actions_ready(temp_output["actions"])
 
                 callback_executor.submit(process_and_send, ready_actions_np, state_np)

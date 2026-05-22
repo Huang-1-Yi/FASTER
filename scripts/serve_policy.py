@@ -24,9 +24,9 @@ class EnvMode(enum.Enum):
 class Checkpoint:
     """Load a policy from a trained checkpoint."""
 
-    # Training config name (e.g., "pi0_aloha_sim").
+    # 训练配置名，例如 "pi0_aloha_sim"。
     config: str
-    # Checkpoint directory (e.g., "checkpoints/pi0_aloha_sim/exp/10000").
+    # checkpoint 目录，例如 "checkpoints/pi0_aloha_sim/exp/10000"。
     dir: str
 
 
@@ -39,37 +39,37 @@ class Default:
 class Args:
     """Arguments for the serve_policy script."""
 
-    # Environment to serve the policy for. This is only used when serving default policies.
+    # 要服务的环境；仅在使用默认 policy 时生效。
     env: EnvMode = EnvMode.ALOHA_SIM
 
-    # If provided, will be used in case the "prompt" key is not present in the data, or if the model doesn't have a default
-    # prompt.
+    # Data contract: obs 缺少 "prompt" 且模型没有默认 prompt 时，使用这里的 default_prompt。
     default_prompt: str | None = None
 
-    # Port to serve the policy on.
+    # policy server 监听端口。
     port: int = 8000
-    # Record the policy's behavior for debugging.
+    # 调试时记录 policy 行为。
     record: bool = False
-    # Use the streaming server (sends actions incrementally as they are denoised).
+    # FASTER: 使用 streaming server，动作在 denoising 过程中逐步发送。
     streaming: bool = False
-    # In streaming mode, stop inference once this many newly ready actions have been emitted.
-    # If None, run the full streaming inference.
+    # FASTER: streaming 模式下，发出指定数量的 newly ready actions 后提前停止；None 表示跑完整推理。
+    # 这个参数只影响 StreamingWebsocketPolicyServer，不改变普通 infer。
     early_stop_actions: int | None = None
 
-    # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
+    # 指定 policy 加载方式；未提供时使用当前环境的默认 policy。
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
 
-    # Whether to use custom sample kwargs for inference. If False, sample_kwargs will not be passed.
+    # FASTER: 是否把自定义 sample_kwargs 传入推理；关闭时保持 checkpoint 默认行为。
     use_custom_sample_kwargs: bool = False
 
-    # Sample kwargs for inference (only used when use_custom_sample_kwargs is True).
+    # FASTER: 以下 sample kwargs 仅在 use_custom_sample_kwargs=True 时生效；
+    # infer_time_schedule 控制普通 sample_actions，streaming server 会固定走 HAS init/step。
     infer_time_schedule: str = "const"
     alpha: float = 0.6
     u0: float = 0.9
     num_steps: int = 10
 
 
-# Default checkpoints that should be used for each environment.
+# 每个环境对应的默认 checkpoint；这里只定义加载入口，具体数据契约由 config.py 的 DataConfig 决定。
 DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
     EnvMode.ALOHA: Checkpoint(
         config="pi05_aloha",
@@ -103,6 +103,8 @@ def create_policy(args: Args) -> _policy.Policy:
     """Create a policy from the given arguments."""
     match args.policy:
         case Checkpoint():
+            # FASTER: 自定义 sample kwargs 是显式 opt-in，避免默认 checkpoint 的推理行为被 HAS/步数实验意外改变。
+            # 关闭时不传这些参数，模型使用自身 sample_actions 的默认值。
             sample_kwargs = (
                 {
                     "infer_time_schedule": args.infer_time_schedule,
@@ -132,7 +134,7 @@ def main(args: Args) -> None:
     policy = create_policy(args)
     policy_metadata = policy.metadata
 
-    # Record the policy's behavior.
+    # 调试时包装 recorder。
     if args.record:
         policy = _policy.PolicyRecorder(policy, "policy_records")
 
@@ -141,6 +143,8 @@ def main(args: Args) -> None:
     logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
 
     if args.streaming:
+        # FASTER: streaming 需要模型实现 sample_actions_streaming_init/step；普通 pi0/pi05 应使用非 streaming server。
+        # WebSocket 协议会先发 partial actions，再发 final 完整结果。
         server = websocket_policy_server.StreamingWebsocketPolicyServer(
             policy=policy,
             host="0.0.0.0",

@@ -40,10 +40,10 @@ class DataTransformFn(Protocol):
 class Group:
     """A group of transforms."""
 
-    # Transforms that are applied to the model input data.
+    # Data contract: inputs 在数据进入模型前执行，通常把环境/dataset 契约整理成 model.Observation/model.Actions。
     inputs: Sequence[DataTransformFn] = ()
 
-    # Transforms that are applied to the model output data.
+    # Data contract: outputs 在模型输出后执行，推理时把模型 action 还原成环境可执行的格式。
     outputs: Sequence[DataTransformFn] = ()
 
     def push(self, *, inputs: Sequence[DataTransformFn] = (), outputs: Sequence[DataTransformFn] = ()) -> "Group":
@@ -114,9 +114,9 @@ class InjectDefaultPrompt(DataTransformFn):
 @dataclasses.dataclass(frozen=True)
 class Normalize(DataTransformFn):
     norm_stats: at.PyTree[NormStats] | None
-    # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
+    # 为 True 时使用 quantile normalization，否则使用普通 z-score normalization。
     use_quantiles: bool = False
-    # If true, will raise an error if any of the keys in the norm stats are not present in the data.
+    # 为 True 时，norm stats 中存在但 data 缺失的 key 会触发错误。
     strict: bool = False
 
     def __post_init__(self):
@@ -127,7 +127,8 @@ class Normalize(DataTransformFn):
         if self.norm_stats is None:
             return data
 
-        # normalize action_prefix the same as actions
+        # FASTER: action_prefix 是已知干净动作历史，必须复用 actions 的归一化统计量；
+        # norm stats 不单独保存 action_prefix，因此这里显式别名到 actions，保证 prefix 与待 denoise suffix 同尺度。
         if "action_prefix" in data and "action_prefix" not in self.norm_stats:
             self.norm_stats["action_prefix"] = self.norm_stats["actions"]
 
@@ -152,7 +153,7 @@ class Normalize(DataTransformFn):
 @dataclasses.dataclass(frozen=True)
 class Unnormalize(DataTransformFn):
     norm_stats: at.PyTree[NormStats] | None
-    # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
+    # 为 True 时使用 quantile normalization，否则使用普通 z-score normalization。
     use_quantiles: bool = False
 
     def __post_init__(self):
@@ -163,11 +164,12 @@ class Unnormalize(DataTransformFn):
         if self.norm_stats is None:
             return data
 
-        # action_prefix will not appear in output
+        # FASTER: action_prefix 只作为输入侧提示存在，不应出现在模型输出；
+        # 删除它可以避免 strict unnormalize 要求输出里也包含 action_prefix。
         if "action_prefix" in self.norm_stats:
             del self.norm_stats["action_prefix"]
 
-        # Make sure that all the keys in the norm stats are present in the data.
+        # Data contract: 输出反归一化要求 norm stats 中的 key 都存在于 data。
         return apply_tree(
             data,
             self.norm_stats,
@@ -212,9 +214,8 @@ class SubsampleActions(DataTransformFn):
 class DeltaActions(DataTransformFn):
     """Repacks absolute actions into delta action space."""
 
-    # Boolean mask for the action dimensions to be repacked into delta action space. Length
-    # can be smaller than the actual number of dimensions. If None, this transform is a no-op.
-    # See `make_bool_mask` for more details.
+    # Data contract: mask 标记哪些 action 维度要转成 delta action；None 表示 no-op。
+    # mask 长度可以小于实际 action_dim，未覆盖维度保持原样，常用于让 gripper 继续保持 absolute。
     mask: Sequence[bool] | None
 
     def __call__(self, data: DataDict) -> DataDict:
@@ -231,6 +232,8 @@ class DeltaActions(DataTransformFn):
             data["actions"] = actions
 
         if "action_prefix" in data:
+            # FASTER: action_prefix 必须和 actions 使用同一套 delta/absolute 约定，
+            # 否则“已知干净”的 prefix 会和待预测 suffix 数值不一致。
             action_prefix = data["action_prefix"].copy()
             action_prefix[..., :dims] -= np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
             data["action_prefix"] = action_prefix
@@ -242,9 +245,8 @@ class DeltaActions(DataTransformFn):
 class AbsoluteActions(DataTransformFn):
     """Repacks delta actions into absolute action space."""
 
-    # Boolean mask for the action dimensions to be repacked into absolute action space. Length
-    # can be smaller than the actual number of dimensions. If None, this transform is a no-op.
-    # See `make_bool_mask` for more details.
+    # Data contract: mask 标记哪些 action 维度要从 delta action 还原成 absolute action；None 表示 no-op。
+    # mask 必须与训练时 DeltaActions 的约定一致，否则执行端会收到错误坐标系的 action。
     mask: Sequence[bool] | None
 
     def __call__(self, data: DataDict) -> DataDict:
@@ -313,7 +315,8 @@ class ExtractFASTActions(DataTransformFn):
     def __call__(self, data: DataDict) -> DataDict:
         if "actions" not in data:
             return data
-        # Model outputs are saved in "actions", but for FAST models they represent tokens.
+        # Data contract: FAST 模型也把输出暂存在 "actions"，但此时内容实际是离散 tokens；
+        # 这里负责把 tokens 解码回连续 action chunk，后续输出 transform 才能按普通 actions 处理。
         tokens = data.pop("actions")
         actions = self.tokenizer.extract_actions(tokens.astype(np.int32), self.action_horizon, self.action_dim)
         return {
@@ -326,7 +329,7 @@ class ExtractFASTActions(DataTransformFn):
 class PromptFromLeRobotTask(DataTransformFn):
     """Extracts a prompt from the current LeRobot dataset task."""
 
-    # Contains the LeRobot dataset tasks (dataset.meta.tasks).
+    # Data contract: 保存 LeRobot dataset tasks，即 dataset.meta.tasks。
     tasks: dict[int, str]
 
     def __call__(self, data: DataDict) -> DataDict:
@@ -352,6 +355,8 @@ class PadStatesAndActions(DataTransformFn):
         if "actions" in data:
             data["actions"] = pad_to_dim(data["actions"], self.model_action_dim, axis=-1)
         if "action_prefix" in data:
+            # FASTER: prefix mode 可能只传入 delay 长度的短历史；进入模型前必须同时 pad action_dim 和 horizon，
+            # 这样 Pi0Faster 才能用固定形状的 action_prefix 和 prefix_action_mask。
             data["action_prefix"] = pad_to_dim(data["action_prefix"], self.model_action_dim, axis=-1)
             data["action_prefix"] = pad_to_dim(data["action_prefix"], self.model_action_horizon, axis=-2)
         return data
@@ -393,7 +398,7 @@ def transform_dict(patterns: Mapping[str, str | None], tree: at.PyTree) -> at.Py
     """
     data = flatten_dict(tree)
 
-    # Compile the patterns.
+    # 预编译 flatten 后的 key pattern。
     compiled = {re.compile(k): v for k, v in patterns.items()}
 
     output = {}
@@ -403,7 +408,7 @@ def transform_dict(patterns: Mapping[str, str | None], tree: at.PyTree) -> at.Py
                 new_k = pattern.sub(repl, k, count=1) if repl is not None else None
                 break
         else:
-            # Use the original key if no match is found.
+            # 未命中 pattern 时保留原始 key。
             new_k = k
 
         if new_k is not None:
@@ -411,7 +416,7 @@ def transform_dict(patterns: Mapping[str, str | None], tree: at.PyTree) -> at.Py
                 raise ValueError(f"Key '{new_k}' already exists in output")
             output[new_k] = data[k]
 
-    # Validate the output structure to make sure that it can be unflattened.
+    # 校验输出结构，确保后续可以 unflatten。
     names = sorted(output)
     for i in range(len(names) - 1):
         name, next_name = names[i : i + 2]

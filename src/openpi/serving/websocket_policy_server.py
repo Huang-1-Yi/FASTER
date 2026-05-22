@@ -65,7 +65,8 @@ class WebsocketPolicyServer:
                     "infer_ms": infer_time * 1000,
                 }
                 if prev_total_time is not None:
-                    # We can only record the last total time since we also want to include the send time.
+                    # server_timing 需要包含发送耗时，因此只能在下一轮记录上一轮 total time；
+                    # 当前响应只能安全记录纯 infer_ms。
                     action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
 
                 await websocket.send(packer.pack(action))
@@ -148,6 +149,8 @@ class StreamingWebsocketPolicyServer:
                 queue: asyncio.Queue = asyncio.Queue()
 
                 def on_actions_ready(ready_actions):
+                    # FASTER: policy callback 产生 partial message，同时后台推理继续 denoise 剩余 horizon；
+                    # 用 call_soon_threadsafe 把推理线程的数据交回 asyncio loop。
                     loop.call_soon_threadsafe(queue.put_nowait, {"type": "partial", "actions": ready_actions})
 
                 def run_inference():
@@ -166,6 +169,8 @@ class StreamingWebsocketPolicyServer:
                 inference_task = asyncio.create_task(asyncio.to_thread(run_inference))
 
                 while True:
+                    # FASTER: action 一旦 ready 就先发送 partial，推理线程结束后再发送 final 完整结果。
+                    # Data contract: partial 只包含本轮新 ready actions，final 才包含完整 output dict。
                     item = await queue.get()
                     if item is None:
                         break
@@ -193,5 +198,5 @@ class StreamingWebsocketPolicyServer:
 def _health_check(connection: _server.ServerConnection, request: _server.Request) -> _server.Response | None:
     if request.path == "/healthz":
         return connection.respond(http.HTTPStatus.OK, "OK\n")
-    # Continue with the normal request handling.
+    # 非 health check 请求继续走正常 WebSocket 处理。
     return None

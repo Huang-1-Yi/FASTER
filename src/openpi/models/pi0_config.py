@@ -22,15 +22,14 @@ class Pi0Config(_model.BaseModelConfig):
     paligemma_variant: _gemma.Variant = "gemma_2b"
     action_expert_variant: _gemma.Variant = "gemma_300m"
 
-    # Set the model specific defaults.
+    # 模型侧默认维度；action_dim/action_horizon 也决定 transform 侧 padding 的目标形状。
     action_dim: int = 32
     action_horizon: int = 50
     max_token_len: int = None  # type: ignore
-    # Pi05 has two differences from Pi0:
-    # - the state input is part of the discrete language tokens rather than a continuous input that is part of the suffix
-    # - the action expert uses adaRMSNorm to inject the flow matching timestep
+    # Pi05 与 Pi0 的核心差异：state 进入离散 language tokens，action expert 用 adaRMSNorm 注入 timestep。
+    # 这会影响 prompt/state tokenization 路径，因此需要与 ModelTransformFactory 的选择保持一致。
     pi05: bool = False
-    # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
+    # 该配置不被模型本体直接读取，而是供 ModelTransformFactory 选择 tokenization 路径。
     discrete_state_input: bool = None  # type: ignore
 
     def __post_init__(self):
@@ -88,7 +87,7 @@ class Pi0Config(_model.BaseModelConfig):
                 gemma_params_filter,
             )
             if "lora" not in self.action_expert_variant:
-                # If only freeze gemma params, exclude action expert params.
+                # 只 freeze gemma 时，不 freeze action expert。
                 filters.append(
                     nnx.Not(action_expert_params_filter),
                 )
@@ -100,7 +99,7 @@ class Pi0Config(_model.BaseModelConfig):
             has_lora = True
 
         if has_lora:
-            # If any lora is used, exclude all lora params.
+            # 只要启用任一 LoRA，就从 freeze filter 中排除所有 LoRA 参数。
             filters.append(
                 nnx.Not(nnx_utils.PathRegex(".*lora.*")),
             )
@@ -115,18 +114,19 @@ class Pi0FasterConfig(_model.BaseModelConfig):
     paligemma_variant: _gemma.Variant = "gemma_2b"
     action_expert_variant: _gemma.Variant = "gemma_300m"
 
-    # Set the model specific defaults.
+    # 模型侧默认维度；FASTER 的 action_prefix、HAS schedule 和 noise 都按这个固定 horizon/action_dim 构造。
     action_dim: int = 32
     action_horizon: int = 50
     max_token_len: int = None  # type: ignore
-    # Pi05 has two differences from Pi0:
-    # - the state input is part of the discrete language tokens rather than a continuous input that is part of the suffix
-    # - the action expert uses adaRMSNorm to inject the flow matching timestep
+    # Pi05 与 Pi0 的核心差异：state 进入离散 language tokens，action expert 用 adaRMSNorm 注入 timestep。
+    # FASTER 仍沿用这个差异，只在 action denoising/schedule 上扩展。
     pi05: bool = False
-    # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
+    # 该配置不被模型本体直接读取，而是供 ModelTransformFactory 选择 tokenization 路径。
     discrete_state_input: bool = None  # type: ignore
 
-    # New config options for FASTER
+    # FASTER: 这些参数控制 prefix-conditioned denoising 与 horizon-aware schedule。
+    # max_delay 是已知干净 action_prefix 的最大长度；mix_prob 控制训练时混入 HAS 的比例；alpha/u0 控制 HAS 形状。
+    # NOTE: max_delay=0 会关闭随机 prefix 训练路径，相关配置需要确认是否仍会调用 randint。
     max_delay: int = 10
     mix_prob: float = 0.5
     alpha: float = 0.6
@@ -141,6 +141,7 @@ class Pi0FasterConfig(_model.BaseModelConfig):
     @property
     @override
     def model_type(self) -> _model.ModelType:
+        # FASTER: 没有单独的 PI0_FASTER enum；transform 和 policy 创建仍把它视作 PI05/PI0。
         if self.pi05:
             return _model.ModelType.PI05
         return _model.ModelType.PI0
@@ -187,7 +188,7 @@ class Pi0FasterConfig(_model.BaseModelConfig):
                 gemma_params_filter,
             )
             if "lora" not in self.action_expert_variant:
-                # If only freeze gemma params, exclude action expert params.
+                # 只 freeze gemma 时，不 freeze action expert。
                 filters.append(
                     nnx.Not(action_expert_params_filter),
                 )
@@ -199,7 +200,7 @@ class Pi0FasterConfig(_model.BaseModelConfig):
             has_lora = True
 
         if has_lora:
-            # If any lora is used, exclude all lora params.
+            # 只要启用任一 LoRA，就从 freeze filter 中排除所有 LoRA 参数。
             filters.append(
                 nnx.Not(nnx_utils.PathRegex(".*lora.*")),
             )

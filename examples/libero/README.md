@@ -1,12 +1,12 @@
 # LIBERO Benchmark
 
-This directory contains the client-side evaluation entry point for the [LIBERO benchmark](https://github.com/Lifelong-Robot-Learning/LIBERO), following the [openpi LIBERO example](https://github.com/Physical-Intelligence/openpi/blob/main/examples/libero/README.md).
+本目录包含 [LIBERO benchmark](https://github.com/Lifelong-Robot-Learning/LIBERO) 的客户端评估入口，遵循 [openpi LIBERO 示例](https://github.com/Physical-Intelligence/openpi/blob/main/examples/libero/README.md)。
 
-For policy training, you can use the LeRobot dataset [physical-intelligence/libero](https://huggingface.co/datasets/physical-intelligence/libero), or convert the RLDS dataset [openvla/modified_libero_rlds](https://huggingface.co/datasets/openvla/modified_libero_rlds) to LeRobot format with [convert_libero_data_to_lerobot.py](convert_libero_data_to_lerobot.py).
+对于策略训练，你可以使用 LeRobot 数据集 [physical-intelligence/libero](https://huggingface.co/datasets/physical-intelligence/libero)，也可以通过 [convert_libero_data_to_lerobot.py](convert_libero_data_to_lerobot.py) 将 RLDS 数据集 [openvla/modified_libero_rlds](https://huggingface.co/datasets/openvla/modified_libero_rlds) 转换为 LeRobot 格式。
 
 ## Setup
 
-Run the following commands from the repository root.
+请在仓库根目录运行以下命令。
 
 ```bash
 # Initialize LIBERO repo
@@ -29,12 +29,12 @@ uv pip install -e third_party/libero
 
 ## Evaluation
 
-Evaluation uses two processes:
+评估使用两个进程：
 
-1. A policy server running in the main openpi environment.
-2. A LIBERO client running in `examples/libero/.venv`.
+1. 在主 openpi 环境中运行的策略服务器。
+2. 在 `examples/libero/.venv` 中运行的 LIBERO 客户端。
 
-### Start the policy server
+### 启动策略服务器
 
 ```bash
 uv run scripts/serve_policy.py policy:checkpoint \
@@ -42,7 +42,7 @@ uv run scripts/serve_policy.py policy:checkpoint \
   --policy.dir=checkpoints/pi05_faster_libero/my_experiment/29999
 ```
 
-### Run evaluation
+### 运行评估
 
 ```bash
 source examples/libero/.venv/bin/activate
@@ -56,19 +56,19 @@ python examples/libero/main.py \
   --args.port 8000
 ```
 
-Useful options:
+常用选项：
 
-- `--args.task-suite-name`: Name of the task suite to evaluate (`libero_spatial`, `libero_object`, `libero_goal`, `libero_10`)
-- `--args.out-path`: Output directory.
-- `--args.save-name`: Identifier for this evaluation run. Results are appended to `{out_path}/results/{save_name}_results.txt`
-- `--args.save-videos`: Save rollout videos under `{out_path}/videos/{save_name}/{task_suite_name}/`
+- `--args.task-suite-name`：要评估的任务套件名称（`libero_spatial`、`libero_object`、`libero_goal`、`libero_10`）。
+- `--args.out-path`：输出目录。
+- `--args.save-name`：本次评估运行的标识符。结果会追加写入 `{out_path}/results/{save_name}_results.txt`。
+- `--args.save-videos`：将 rollout 视频保存到 `{out_path}/videos/{save_name}/{task_suite_name}/`。
 
 
-See [main.py](main.py) for the full list of CLI options.
+完整 CLI 选项列表请见 [main.py](main.py)。
 
 ## Results
 
-The following checkpoints are fine-tuned jointly on the four task suites for 30k steps.
+以下 checkpoint 在四个任务套件上联合微调了 30k 步。
 
 | Model       | Config               | Libero Spatial | Libero Object | Libero Goal | Libero 10 | Average |
 | ----------- | -------------------- | -------------- | ------------- | ----------- | --------- | ------- |

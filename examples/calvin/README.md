@@ -1,8 +1,8 @@
 # CALVIN Benchmark
 
-This directory contains the client-side evaluation entry point for the [CALVIN benchmark](https://github.com/mees/calvin).
+本目录包含 [CALVIN benchmark](https://github.com/mees/calvin) 的客户端评估入口。
 
-For policy training, you can use the LeRobot dataset [InternRobotics/InternData-Calvin_ABC](https://huggingface.co/datasets/InternRobotics/InternData-Calvin_ABC). We provide corresponding configs: 
+对于策略训练，你可以使用 LeRobot 数据集 [InternRobotics/InternData-Calvin_ABC](https://huggingface.co/datasets/InternRobotics/InternData-Calvin_ABC)。我们提供了对应配置：
 
 - [`CalvinInputs` and `CalvinOutputs`](../../src/openpi/policies/calvin_policy.py)
 - [`LeRobotCalvinDataConfig`](../../src/openpi/training/config.py)
@@ -10,13 +10,13 @@ For policy training, you can use the LeRobot dataset [InternRobotics/InternData-
 
 ## Setup
 
-Clone the CALVIN repo and update the path in [main.py](main.py):
+克隆 CALVIN 仓库，并在 [main.py](main.py) 中更新路径：
 
 ```python
 CALVIN_ROOT = "/path/to/calvin"
 ```
 
-Create conda environment `calvin_venv` and install dependencies following [official instruction](https://github.com/mees/calvin#computer--quick-start). Then install the client package from the FASTER repo root:
+按照[官方说明](https://github.com/mees/calvin#computer--quick-start)创建 conda 环境 `calvin_venv` 并安装依赖。然后在 FASTER 仓库根目录安装客户端包：
 
 ```bash
 cd /path/to/FASTER
@@ -24,16 +24,16 @@ pip install -e packages/openpi-client
 pip install draccus
 ```
 
-Make sure you have downloaded the dataset in `dataset/task_ABC_D/validation/`.
+请确保已经将数据集下载到 `dataset/task_ABC_D/validation/`。
 
 ## Evaluation
 
-Evaluation uses two processes:
+评估使用两个进程：
 
-1. A policy server running in the main openpi environment.
-2. A CALVIN client running in the `calvin_venv` environment.
+1. 在主 openpi 环境中运行的策略服务器。
+2. 在 `calvin_venv` 环境中运行的 CALVIN 客户端。
 
-### Start the policy server
+### 启动策略服务器
 
 ```bash
 uv run scripts/serve_policy.py policy:checkpoint \
@@ -41,7 +41,7 @@ uv run scripts/serve_policy.py policy:checkpoint \
   --policy.dir=checkpoints/pi05_faster_calvin/my_experiment/29999
 ```
 
-### Run evaluation
+### 运行评估
 
 ```bash
 conda activate calvin_venv
@@ -54,34 +54,34 @@ python examples/calvin/main.py \
   --port 8000
 ```
 
-Useful options:
+常用选项：
 
-- `--out_path`: Output directory.
-- `--save_name`: Identifier for this evaluation run. Logs are written under `{out_path}/{save_name}/`.
+- `--out_path`：输出目录。
+- `--save_name`：本次评估运行的标识符。日志会写入 `{out_path}/{save_name}/`。
 
-See [main.py](main.py) for the full list of CLI options.
+完整 CLI 选项列表请见 [main.py](main.py)。
 
-Results are written to:
+结果会写入：
 
 ```text
 {out_path}/{save_name}/result.json
 {out_path}/{save_name}/success_rate.txt
 ```
 
-`result.json` contain:
+`result.json` 包含：
 
-- `avg_seq_len`: average successful sequence length in each 5-instruction chain.
-- `chain_sr`: success rates for completing 1, 2, 3, 4, and 5 instructions in a row.
-- `task_info`: per-task success and total counts.
+- `avg_seq_len`：每个 5 指令链中的平均成功序列长度。
+- `chain_sr`：连续完成 1、2、3、4 和 5 条指令的成功率。
+- `task_info`：每个任务的成功次数和总次数。
 
 
 ## Results
 
-The following results are evaluated with the standard CALVIN ABC->D benchmark:
+以下结果使用标准 CALVIN ABC->D 基准进行评估：
 
-- 1,000 evaluation sequences
-- 5 chained instructions per sequence
-- 720 environment steps per instruction
+- 1,000 条评估序列
+- 每条序列包含 5 条链式指令
+- 每条指令最多 720 个环境步
 
 | Model       | Config               | 1    | 2    | 3    | 4    | 5    | Average Len |
 | ----------- | -------------------- | ---- | ---- | ---- | ---- | ---- | ----------- |

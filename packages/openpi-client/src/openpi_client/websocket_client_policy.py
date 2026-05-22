@@ -49,7 +49,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
         self._ws.send(data)
         response = self._ws.recv()
         if isinstance(response, str):
-            # we're expecting bytes; if the server sends a string, it's an error.
+            # Data contract: 正常响应应是 msgpack bytes；若收到 string，表示服务端返回了 traceback/error 文本。
             raise RuntimeError(f"Error in inference server:\n{response}")
         return msgpack_numpy.unpackb(response)
 
@@ -74,6 +74,8 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
 
             if msg.get("type") == "partial":
                 if on_actions_ready is not None:
+                    # FASTER: partial message 携带可提前执行的 ready actions，final 再返回完整 horizon；
+                    # callback 只收到 actions，保持客户端执行路径轻量。
                     on_actions_ready(msg["actions"])
             else:
                 return msg

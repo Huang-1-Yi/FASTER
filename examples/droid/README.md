@@ -1,28 +1,28 @@
 # DROID Policies in openpi
 
-We offer instructions for:
-- [Running inference for our best $pi_{0.5}$-DROID policy](./README.md#running-droid-inference)
-- [Running inference for other pre-trained DROID policies ($\pi_0$, $\pi_0$-FAST, ...)](./README.md#running-roboarena-baseline-policies)
-- [Pre-training *generalist* policies on the *full* DROID dataset](./README_train.md#training-on-droid)
-- [Fine-tuning expert $\pi_{0.5}$ on your custom DROID dataset](./README_train.md#fine-tuning-on-custom-droid-datasets)
+我们提供以下说明：
+- [运行最佳 $pi_{0.5}$-DROID 策略的推理](./README.md#running-droid-inference)
+- [运行其他预训练 DROID 策略（$\pi_0$、$\pi_0$-FAST 等）的推理](./README.md#running-roboarena-baseline-policies)
+- [在完整 DROID 数据集上预训练 *generalist* 策略](./README_train.md#training-on-droid)
+- [在自定义 DROID 数据集上微调 expert $\pi_{0.5}$](./README_train.md#fine-tuning-on-custom-droid-datasets)
 
 ## Running DROID Inference
 
-This example shows how to run the fine-tuned $\pi_{0.5}$-DROID model on the [DROID robot platform](https://github.com/droid-dataset/droid). Based on the [public RoboArena benchmark](https://robo-arena.github.io/leaderboard), this is currently our strongest generalist DROID policy. 
+本示例展示如何在 [DROID robot platform](https://github.com/droid-dataset/droid) 上运行微调后的 $\pi_{0.5}$-DROID 模型。根据公开的 [RoboArena benchmark](https://robo-arena.github.io/leaderboard)，这是我们目前最强的 generalist DROID 策略。
 
 
 ### Step 1: Start a policy server
 
-Since the DROID control laptop does not have a powerful GPU, we will start a remote policy server on a different machine with a more powerful GPU and then query it from the DROID control laptop during inference.
+由于 DROID 控制笔记本没有强大的 GPU，我们会在另一台配备更强 GPU 的机器上启动远程策略服务器，然后在推理期间由 DROID 控制笔记本向该服务器发起请求。
 
-1. On a machine with a powerful GPU (~NVIDIA 4090), clone and install the `openpi` repository following the instructions in the [README](https://github.com/Physical-Intelligence/openpi).
-2. Start the OpenPI server via the following command:
+1. 在一台配备强大 GPU（约 NVIDIA 4090）的机器上，按照 [README](https://github.com/Physical-Intelligence/openpi) 中的说明克隆并安装 `openpi` 仓库。
+2. 使用以下命令启动 OpenPI 服务器：
 
 ```bash
 uv run scripts/serve_policy.py policy:checkpoint --policy.config=pi05_droid --policy.dir=gs://openpi-assets/checkpoints/pi05_droid
 ```
 
-You can also run the equivalent command below:
+你也可以运行下面的等价命令：
 
 ```bash
 uv run scripts/serve_policy.py --env=DROID
@@ -30,33 +30,33 @@ uv run scripts/serve_policy.py --env=DROID
 
 ### Step 2: Run the DROID robot
 
-1. Make sure you have the most recent version of the DROID package installed on both the DROID control laptop and the NUC.
-2. On the control laptop, activate your DROID conda environment.
-3. Clone the openpi repo and install the openpi client, which we will use to connect to the policy server (this has very few dependencies and should be very fast to install): with the DROID conda environment activated, run `cd $OPENPI_ROOT/packages/openpi-client && pip install -e .`.
-4. Install `tyro`, which we will use for command line parsing: `pip install tyro`.
-5. Copy the `main.py` file from this directory to the `$DROID_ROOT/scripts` directory.
-6. Replace the camera IDs in the `main.py` file with the IDs of your cameras (you can find the camera IDs by running `ZED_Explorer` in the command line, which will open a tool that shows you all connected cameras and their IDs -- you can also use it to make sure that the cameras are well-positioned to see the scene you want the robot to interact with).
-7. Run the `main.py` file. Make sure to point the IP and host address to the policy server. (To make sure the server machine is reachable from the DROID laptop, you can run `ping <server_ip>` from the DROID laptop.) Also make sure to specify the external camera to use for the policy (we only input one external camera), choose from ["left", "right"].
+1. 确保 DROID 控制笔记本和 NUC 上都安装了最新版本的 DROID 包。
+2. 在控制笔记本上激活你的 DROID conda 环境。
+3. 克隆 openpi 仓库并安装 openpi client，用于连接策略服务器。该客户端依赖很少，安装应当很快：在已激活 DROID conda 环境的情况下，运行 `cd $OPENPI_ROOT/packages/openpi-client && pip install -e .`。
+4. 安装 `tyro`，用于命令行解析：`pip install tyro`。
+5. 将本目录中的 `main.py` 文件复制到 `$DROID_ROOT/scripts` 目录。
+6. 将 `main.py` 文件中的相机 ID 替换为你的相机 ID。你可以在命令行运行 `ZED_Explorer` 查找相机 ID，它会打开一个工具，显示所有已连接的相机及其 ID；你也可以用它确认相机位置是否能看到你希望机器人交互的场景。
+7. 运行 `main.py` 文件。请确保将 IP 和 host 地址指向策略服务器。（要确认 DROID 笔记本能访问服务器机器，可以在 DROID 笔记本上运行 `ping <server_ip>`。）同时请指定策略使用的外部相机；我们只输入一个外部相机，可从 ["left", "right"] 中选择。
 
 ```bash
 python3 scripts/main.py --remote_host=<server_ip> --remote_port=<server_port> --external_camera="left"
 ```
 
-The script will ask you to enter a free-form language instruction for the robot to follow. Make sure to point the cameras at the scene you want the robot to interact with. You _do not_ need to carefully control camera angle, object positions, etc. The policy is fairly robust in our experience. Happy prompting!
+脚本会要求你输入一条自由形式的语言指令，供机器人执行。请确保相机对准你希望机器人交互的场景。你不需要精细控制相机角度、物体位置等；根据我们的经验，该策略具有相当好的鲁棒性。祝你 prompt 顺利！
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
-| Cannot reach policy server | Make sure the server is running and the IP and port are correct. You can check that the server machine is reachable by running `ping <server_ip>` from the DROID laptop. |
-| Cannot find cameras | Make sure the camera IDs are correct and that the cameras are connected to the DROID laptop. Sometimes replugging the cameras can help. You can check all connected cameras by running `ZED_Explore` in the command line. |
-| Policy inference is slow / inconsistent | Try using a wired internet connection for the DROID laptop to reduce latency (0.5 - 1 sec latency per chunk is normal). |
-| Policy does not perform the task well | In our experiments, the policy could perform simple table top manipulation tasks (pick-and-place) across a wide range of environments, camera positions, and lighting conditions. If the policy does not perform the task well, you can try modifying the scene or object placement to make the task easier. Also make sure that the camera view you are passing to the policy can see all relevant objects in the scene (the policy is only conditioned on a single external camera + wrist camera, make sure you are feeding the desired camera to the policy). Use `ZED_Explore` to check that the camera view you are passing to the policy can see all relevant objects in the scene. Finally, the policy is far from perfect and will fail on more complex manipulation tasks, but it usually makes a decent effort. :) |
+| Cannot reach policy server | 确保服务器正在运行，并且 IP 和端口正确。你可以在 DROID 笔记本上运行 `ping <server_ip>`，检查服务器机器是否可达。 |
+| Cannot find cameras | 确保相机 ID 正确，且相机已连接到 DROID 笔记本。有时重新插拔相机也会有帮助。你可以在命令行运行 `ZED_Explore` 查看所有已连接的相机。 |
+| Policy inference is slow / inconsistent | 尝试为 DROID 笔记本使用有线网络连接以降低延迟（每个动作块 0.5 - 1 秒延迟是正常的）。 |
+| Policy does not perform the task well | 在我们的实验中，该策略可以在广泛的环境、相机位置和光照条件下完成简单桌面操作任务（pick-and-place）。如果策略执行效果不佳，可以尝试调整场景或物体摆放，让任务更容易。同时请确认传给策略的相机视角能看到场景中的所有相关物体（策略只以单个外部相机和腕部相机为条件，因此要确保输入的是期望的相机）。使用 `ZED_Explore` 检查传给策略的相机视角是否能看到场景中的所有相关物体。最后，该策略远非完美，在更复杂的操作任务上会失败，但通常会做出还不错的尝试。:) |
 
 
 ## Running Other Policies
 
-We provide configs for running the baseline DROID policies from the [RoboArena](https://robo-arena.github.io/) paper. Simply run the commands below to start inference servers for the respective policies. Then follow the instructions above to run evaluation on the DROID robot.
+我们提供了用于运行 [RoboArena](https://robo-arena.github.io/) 论文中 DROID baseline 策略的配置。只需运行下面的命令，即可为对应策略启动推理服务器。然后按照上面的说明在 DROID 机器人上运行评估。
 
 ```
 # Train from pi0-FAST, using FAST tokenizer
@@ -81,4 +81,4 @@ uv run scripts/serve_policy.py policy:checkpoint --policy.config=paligemma_vq_dr
 uv run scripts/serve_policy.py policy:checkpoint --policy.config=paligemma_diffusion_droid --policy.dir=gs://openpi-assets/checkpoints/roboarena/paligemma_diffusion_droid
 ```
 
-You can find the inference configs in [roboarena_config.py](../../src/openpi/training/misc/roboarena_config.py).
+你可以在 [roboarena_config.py](../../src/openpi/training/misc/roboarena_config.py) 中找到这些推理配置。

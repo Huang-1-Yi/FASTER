@@ -32,7 +32,7 @@ import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
 
 ModelType: TypeAlias = _model.ModelType
-# Work around a tyro issue with using nnx.filterlib.Filter directly.
+# NOTE: 绕过 tyro 直接使用 nnx.filterlib.Filter 时的问题。
 Filter: TypeAlias = nnx.filterlib.Filter
 
 
@@ -54,49 +54,44 @@ class AssetsConfig:
     ```
     """
 
-    # Assets directory. If not provided, the config assets_dirs will be used. This is useful to load assets from
-    # a different checkpoint (e.g., base model checkpoint) or some other centralized location.
+    # assets 目录；未提供时使用 config.assets_dirs，可用于从 base model checkpoint 等集中位置加载 assets。
     assets_dir: str | None = None
 
-    # Asset id. If not provided, the repo id will be used. This allows users to reference assets that describe
-    # different robot platforms.
+    # asset id；未提供时使用 repo id，用来引用不同机器人平台的 assets。
     asset_id: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
 class DataConfig:
-    # LeRobot repo id. If None, fake data will be created.
+    # LeRobot repo id；None 表示创建 fake data。
     repo_id: str | None = None
-    # Directory within the assets directory containing the data assets.
+    # assets 目录下存放 data assets 的子目录。
     asset_id: str | None = None
-    # Contains precomputed normalization stats. If None, normalization will not be performed.
+    # 预计算 normalization stats；None 表示不做 normalization。
     norm_stats: dict[str, _transforms.NormStats] | None = None
 
-    # Used to adopt the inputs from a dataset specific format to a common format
-    # which is expected by the data transforms.
+    # Data contract: 将 dataset 专用格式改写成 data_transforms 期望的通用格式。
     repack_transforms: _transforms.Group = dataclasses.field(default_factory=_transforms.Group)
-    # Data transforms, typically include robot specific transformations. Will be applied
-    # before the data is normalized. See `model.Observation` and `model.Actions` to learn about the
-    # normalized data.
+    # Data contract: data_transforms 通常包含机器人专用转换，并在 normalization 之前执行。
+    # 规范化后的字段契约见 `model.Observation` 和 `model.Actions`。
     data_transforms: _transforms.Group = dataclasses.field(default_factory=_transforms.Group)
-    # Model specific transforms. Will be applied after the data is normalized.
+    # 模型专用 transforms，在数据 normalization 之后执行。
     model_transforms: _transforms.Group = dataclasses.field(default_factory=_transforms.Group)
-    # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
+    # 为 True 时使用 quantile normalization，否则使用普通 z-score normalization。
     use_quantile_norm: bool = False
 
-    # Names of keys that will be used by the data loader to generate the action sequence. The length of the
-    # sequence is defined by the `action_horizon` field in the model config. This should be adjusted if your
-    # LeRobot dataset is using different keys to represent the action.
+    # Data contract: data loader 用这些 key 生成 action sequence，长度由 model config 的 action_horizon 决定。
+    # 若 LeRobot dataset 使用不同 action key，需要同步调整。
     action_sequence_keys: Sequence[str] = ("actions",)
 
-    # If true, will use the LeRobot dataset task to define the prompt.
+    # 为 True 时使用 LeRobot dataset task 生成 prompt。
     prompt_from_task: bool = False
 
-    # Only used for RLDS data loader (ie currently only used for DROID).
+    # 仅供 RLDS data loader 使用，目前主要用于 DROID。
     rlds_data_dir: str | None = None
-    # Action space for DROID dataset.
+    # DROID dataset 的 action space。
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
-    # List of datasets to sample from: name, version, weight, and optionally filter_dict_path
+    # Data contract: 采样的 dataset 列表包含 name、version、weight 和可选 filter_dict_path。
     datasets: Sequence[droid_rlds_dataset.RLDSDataset] = ()
 
 
@@ -109,7 +104,7 @@ class GroupFactory(Protocol):
 class ModelTransformFactory(GroupFactory):
     """Creates model transforms for standard pi0 models."""
 
-    # If provided, will determine the default prompt that be used by the model.
+    # Data contract: 输入样本没有 "prompt" 时注入该默认 prompt，保证后续 tokenizer 总能拿到语言条件。
     default_prompt: str | None = None
 
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
@@ -129,6 +124,8 @@ class ModelTransformFactory(GroupFactory):
                 assert isinstance(model_config, pi0_config.Pi0Config) or isinstance(
                     model_config, pi0_config.Pi0FasterConfig
                 )
+                # FASTER: Pi0FasterConfig.model_type 仍返回 PI05/PI0，因此复用常规 pi05/pi0 transform 路径，
+                # 不新增单独的 PI0_FASTER 分支。
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
@@ -169,11 +166,11 @@ class ModelTransformFactory(GroupFactory):
 
 @dataclasses.dataclass(frozen=True)
 class DataConfigFactory(abc.ABC):
-    # The LeRobot repo id.
+    # LeRobot 数据集 repo id。
     repo_id: str = tyro.MISSING
-    # Determines how the assets will be loaded.
+    # 控制 assets 的加载方式。
     assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
-    # Base config that will be updated by the factory.
+    # factory 会在这个 base config 上做定制化更新。
     base_config: tyro.conf.Suppress[DataConfig | None] = None
 
     @abc.abstractmethod
@@ -195,7 +192,7 @@ class DataConfigFactory(abc.ABC):
         if asset_id is None:
             return None
         try:
-            data_assets_dir = str(assets_dir / asset_id)  # asset_id if asset_id is absolute path
+            data_assets_dir = str(assets_dir / asset_id)  # asset_id 是绝对路径时会直接生效
             norm_stats = _normalize.load(_download.maybe_download(data_assets_dir))
             logging.info(f"Loaded norm stats from {data_assets_dir}")
             return norm_stats
@@ -215,9 +212,9 @@ class FakeDataConfig(DataConfigFactory):
 
 @dataclasses.dataclass(frozen=True)
 class SimpleDataConfig(DataConfigFactory):
-    # Factory for the data transforms.
+    # data transforms 的 factory。
     data_transforms: tyro.conf.Suppress[GroupFactory] = dataclasses.field(default_factory=GroupFactory)
-    # Factory for the model transforms.
+    # model transforms 的 factory。
     model_transforms: tyro.conf.Suppress[GroupFactory] = dataclasses.field(default_factory=ModelTransformFactory)
 
     @override
@@ -231,17 +228,15 @@ class SimpleDataConfig(DataConfigFactory):
 
 @dataclasses.dataclass(frozen=True)
 class LeRobotAlohaDataConfig(DataConfigFactory):
-    # If true, will convert joint dimensions to deltas with respect to the current state before passing to the model.
-    # Gripper dimensions will remain in absolute values.
+    # Data contract: 为 True 时，送入模型前将 joint 维度转成相对当前 state 的 delta；gripper 保持 absolute。
     use_delta_joint_actions: bool = True
-    # If provided, will be injected into the input data if the "prompt" key is not present.
+    # Data contract: 输入缺少 "prompt" 时注入该默认 prompt。
     default_prompt: str | None = None
-    # If true, this will convert the joint and gripper values from the standard Aloha space to
-    # the space used by the pi internal runtime which was used to train the base model. People who
-    # use standard Aloha data should set this to true.
+    # Data contract: 为 True 时把标准 Aloha joint/gripper 值转换到 base model 训练使用的 pi internal runtime 空间。
+    # 标准 Aloha 数据应保持为 True。
     adapt_to_pi: bool = True
 
-    # Repack transforms.
+    # Data contract: Aloha repack 把 LeRobot 键名对齐到 AlohaInputs 契约。
     repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
         default=_transforms.Group(
             inputs=[
@@ -255,7 +250,7 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
             ]
         )
     )
-    # Action keys that will be used to read the action sequence from the dataset.
+    # Data contract: 从这些 dataset keys 读取 action sequence。
     action_sequence_keys: Sequence[str] = ("action",)
 
     @override
@@ -294,14 +289,9 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        # The repack transform is *only* applied to the data coming from the dataset,
-        # and *not* during inference. We can use it to make inputs from the dataset look
-        # as close as possible to those coming from the inference environment (e.g. match the keys).
-        # Below, we match the keys in the dataset (which we defined in the data conversion script) to
-        # the keys we use in our inference pipeline (defined in the inference script for libero).
-        # For your own dataset, first figure out what keys your environment passes to the policy server
-        # and then modify the mappings below so your dataset's keys get matched to those target keys.
-        # The repack transform simply remaps key names here.
+        # Data contract: repack 只作用于离线 dataset，不作用于在线推理；它把 LeRobot 转换脚本产出的键名
+        # 对齐到 LIBERO 推理 adapter 的输入契约。自定义 dataset 时，先看 policy server 实际传入哪些 key，
+        # 再把这里的映射改成“dataset key -> 推理契约 key”。
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
@@ -316,29 +306,16 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             ]
         )
 
-        # The data transforms are applied to the data coming from the dataset *and* during inference.
-        # Below, we define the transforms for data going into the model (``inputs``) and the transforms
-        # for data coming out of the model (``outputs``) (the latter is only used during inference).
-        # We defined these transforms in `libero_policy.py`. You can check the detailed comments there for
-        # how to modify the transforms to match your dataset. Once you created your own transforms, you can
-        # replace the transforms below with your own.
+        # Data contract: data_transforms 同时用于训练和推理；inputs 把 LIBERO 契约转成 openpi 统一输入，
+        # outputs 只在推理后把模型输出转回环境 action。若换自定义 adapter，就替换这里的 inputs/outputs。
         data_transforms = _transforms.Group(
             inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
             outputs=[libero_policy.LiberoOutputs()],
         )
 
-        # One additional data transform: pi0 models are trained on delta actions (relative to the first
-        # state in each action chunk). IF your data has ``absolute`` actions (e.g. target joint angles)
-        # you can uncomment the following line to convert the actions to delta actions. The only exception
-        # is for the gripper actions which are always absolute.
-        # In the example below, we would apply the delta conversion to the first 6 actions (joints) and
-        # leave the 7th action (gripper) unchanged, i.e. absolute.
-        # In Libero, the raw actions in the dataset are already delta actions, so we *do not* need to
-        # apply a separate delta conversion (that's why it's commented out). Choose whether to apply this
-        # transform based on whether your dataset uses ``absolute`` or ``delta`` actions out of the box.
-
-        # LIBERO already represents actions as deltas, but we have some old Pi0 checkpoints that are trained with this
-        # extra delta transform.
+        # Data contract: Pi0 训练通常使用相对当前 state 的 delta actions；若 dataset 存的是 absolute 关节目标，
+        # 需要用 DeltaActions 转换 joint 维度并让 gripper 保持 absolute。LIBERO 原始 actions 已是 delta，
+        # 只有兼容旧 Pi0 checkpoint 时才额外开启这里的 DeltaActions。
         if self.extra_delta_transform:
             delta_action_mask = _transforms.make_bool_mask(6, -1)
             data_transforms = data_transforms.push(
@@ -346,11 +323,11 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
             )
 
-        # Model transforms include things like tokenizing the prompt and action targets
-        # You do not need to change anything here for your own dataset.
+        # Data contract: model_transforms 处理 prompt tokenization、图像尺寸、state/action padding 等模型侧格式；
+        # 这层与具体 dataset key 无关，自定义数据集通常只改 repack/data_transforms。
         model_transforms = ModelTransformFactory()(model_config)
 
-        # We return all data transforms for training and inference. No need to change anything here.
+        # Data contract: 返回的三层 transform 让离线样本和在线 obs 走同一口径，避免训练/部署格式漂移。
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             repack_transforms=repack_transform,
@@ -368,11 +345,10 @@ class RLDSDroidDataConfig(DataConfigFactory):
     rlds_data_dir: str | None = None
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
 
-    # Filtering options. Can pass a path to a dictionary that maps episodes to timestep ranges
-    # to tuples denoting ranges of time steps to keep (start, end). Episodes are uniquely identified with
-    # f"{recording_folderpath}--{file_path}", both of which are present in the RLDS episode metadata.
+    # Data contract: 可用过滤字典限定每个 episode 保留的 timestep 范围；episode id 由 RLDS metadata 中的
+    # recording_folderpath 和 file_path 组成，过滤值是要保留的 (start, end) timestep 区间。
 
-    # List of datasets to sample from: name, version, weight, and optionally filter_dict_path
+    # Data contract: RLDS 采样源由 name、version、weight 和可选 filter_dict_path 定义。
     datasets: Sequence[droid_rlds_dataset.RLDSDataset] = (
         droid_rlds_dataset.RLDSDataset(
             name="droid",
@@ -384,6 +360,8 @@ class RLDSDroidDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Data contract: RLDS DROID 与 LeRobot DROID 原始键名不同，但都要对齐到 DroidInputs 契约：
+        # 外部相机、wrist 相机、关节状态、gripper 和 actions。这里的 repack 只服务训练数据加载。
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
@@ -405,7 +383,7 @@ class RLDSDroidDataConfig(DataConfigFactory):
         )
 
         if self.action_space == droid_rlds_dataset.DroidActionSpace.JOINT_POSITION:
-            # Data loader returns absolute joint position actions -- convert to delta actions for training.
+            # Data contract: joint position action 是绝对目标，训练前需要转成相对当前 state 的 delta。
             delta_action_mask = _transforms.make_bool_mask(7, -1)
             data_transforms = data_transforms.push(
                 inputs=[_transforms.DeltaActions(delta_action_mask)],
@@ -436,6 +414,8 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Data contract: 自定义 LeRobot DROID 数据应遵守 DroidInputs/DroidOutputs 契约：
+        # 7 个机器人维度加 1 个 gripper 维度，并使用与在线 Franka/DROID-style obs 一致的图像 key。
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
@@ -451,7 +431,8 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
                 )
             ]
         )
-        # We assume joint *velocity* actions, so we should *not* apply an additional delta transform.
+        # Data contract: 这里假设 actions 是 joint velocity，而不是 absolute joint position，
+        # 因此不再额外做 DeltaActions；若数据改成 absolute 目标，需要重新启用 delta 转换。
         data_transforms = _transforms.Group(
             inputs=[droid_policy.DroidInputs(model_type=model_config.model_type)],
             outputs=[droid_policy.DroidOutputs()],
@@ -468,13 +449,13 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
 
 @dataclasses.dataclass(frozen=True)
 class LeRobotAgilexDataConfig(DataConfigFactory):
-    # If true, will convert joint dimensions to deltas with respect to the current state before passing to the model.
-    # Gripper dimensions will remain in absolute values.
+    # Data contract: 为 True 时，送入模型前将 joint 维度转成相对当前 state 的 delta；gripper 保持 absolute。
     use_delta_joint_actions: bool = True
-    # If provided, will be injected into the input data if the "prompt" key is not present.
+    # Data contract: 输入缺少 "prompt" 时注入该默认 prompt。
     default_prompt: str | None = None
 
-    # Repack transforms.
+    # Data contract: Agilex repack 把 LeRobot 键名对齐到 AgilexInputs 契约；自定义相机名时，
+    # 同步修改这里的 observation.images.* 映射和 AgilexInputs.EXPECTED_CAMERAS。
     repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
         default=_transforms.Group(
             inputs=[
@@ -493,7 +474,7 @@ class LeRobotAgilexDataConfig(DataConfigFactory):
             ]
         )
     )
-    # Action keys that will be used to read the action sequence from the dataset.
+    # Data contract: 从这些 dataset keys 读取 action sequence。
     action_sequence_keys: Sequence[str] = ("action",)
 
     @override
@@ -526,6 +507,8 @@ class LeRobotCalvinDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Data contract: CALVIN 将 observation/action 分字段存储，adapter 会把 ee_pos、ee_rot、gripper
+        # 拼成统一的 state/action 向量；自定义 CALVIN-like 数据时，优先改这里的 repack key。
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
@@ -544,7 +527,7 @@ class LeRobotCalvinDataConfig(DataConfigFactory):
             ]
         )
 
-        # Action keys that will be used to read the action sequence from the dataset.
+        # Data contract: CALVIN action chunk 从这些 dataset keys 读取并拼接；顺序必须与 CalvinInputs 中的 action 拼接一致。
         action_sequence_keys: Sequence[str] = ("action.delta_ee_pos", "action.delta_ee_rot", "action.gripper")
 
         data_transforms = _transforms.Group(
@@ -566,74 +549,70 @@ class LeRobotCalvinDataConfig(DataConfigFactory):
 
 @dataclasses.dataclass(frozen=True)
 class TrainConfig:
-    # Name of the config. Must be unique. Will be used to reference this config.
+    # config 名称必须唯一，外部通过它引用该配置。
     name: tyro.conf.Suppress[str]
-    # Project name.
+    # 项目名称。
     project_name: str = "openpi"
-    # Experiment name. Will be used to name the metadata and checkpoint directories.
+    # 实验名称，用于命名 metadata 和 checkpoint 目录。
     exp_name: str = tyro.MISSING
 
-    # Defines the model config. Some attributes (action_dim, action_horizon, and max_token_len) are shared by all models
-    # -- see BaseModelConfig. Specific model implementations (e.g., Pi0Config) inherit from BaseModelConfig and may
-    # define additional attributes.
+    # 定义 model config；action_dim、action_horizon、max_token_len 等共享字段见 BaseModelConfig，
+    # 具体模型配置（如 Pi0Config）会继承它并补充额外字段。
     model: _model.BaseModelConfig = dataclasses.field(default_factory=pi0_config.Pi0Config)
 
-    # A weight loader can optionally load (possibly partial) weights from disk after the model is initialized.
+    # model 初始化后，可选 weight_loader 从磁盘加载完整或部分权重。
     weight_loader: weight_loaders.WeightLoader = dataclasses.field(default_factory=weight_loaders.NoOpWeightLoader)
 
-    # Optional path to a PyTorch checkpoint to load weights from.
+    # 可选 PyTorch checkpoint 路径，用于加载权重。
     pytorch_weight_path: str | None = None
 
-    # Precision for PyTorch training.
+    # PyTorch 训练精度。
     pytorch_training_precision: Literal["bfloat16", "float32"] = "bfloat16"
 
     lr_schedule: _optimizer.LRScheduleConfig = dataclasses.field(default_factory=_optimizer.CosineDecaySchedule)
     optimizer: _optimizer.OptimizerConfig = dataclasses.field(default_factory=_optimizer.AdamW)
     ema_decay: float | None = 0.99
 
-    # Specifies which weights should be frozen.
+    # 指定哪些 weights 需要 freeze。
     freeze_filter: tyro.conf.Suppress[Filter] = dataclasses.field(default_factory=nnx.Nothing)
 
-    # Determines the data to be trained on.
+    # 指定训练使用的数据配置。
     data: DataConfigFactory = dataclasses.field(default_factory=FakeDataConfig)
 
-    # Base directory for config assets (e.g., norm stats).
+    # config assets 的基础目录，例如 norm stats。
     assets_base_dir: str = "./assets"
-    # Base directory for checkpoints.
+    # checkpoints 的基础目录。
     checkpoint_base_dir: str = "./checkpoints"
 
-    # Random seed that will be used by random generators during training.
+    # 训练中各随机生成器使用的 random seed。
     seed: int = 42
-    # Global batch size.
+    # 全局 batch size。
     batch_size: int = 32
-    # Number of workers to use for the data loader. Increasing this number will speed up data loading but
-    # will increase memory and CPU usage.
+    # data loader worker 数；增大会加快加载，但也会增加内存和 CPU 占用。
     num_workers: int = 2
-    # Number of train steps (batches) to run.
+    # 训练步数，以 batch 为单位。
     num_train_steps: int = 30_000
 
-    # How often (in steps) to log training metrics.
+    # 每隔多少 step 记录一次训练指标。
     log_interval: int = 100
-    # How often (in steps) to save checkpoints.
+    # 每隔多少 step 保存一次 checkpoint。
     save_interval: int = 1000
-    # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
+    # 若设置，满足 step % keep_period == 0 的已有 checkpoint 不会被删除。
     keep_period: int | None = 5000
 
-    # If true, will overwrite the checkpoint directory if it already exists.
+    # 为 True 时，如果 checkpoint 目录已存在则覆盖。
     overwrite: bool = False
-    # If true, will resume training from the last checkpoint.
+    # 为 True 时，从最后一个 checkpoint 继续训练。
     resume: bool = False
 
-    # If true, will enable wandb logging.
+    # 为 True 时启用 wandb logging。
     wandb_enabled: bool = True
 
-    # Used to pass metadata to the policy server.
+    # 传给 policy server 的 metadata。
     policy_metadata: dict[str, Any] | None = None
 
-    # If the value is greater than 1, FSDP will be enabled and shard across number of specified devices; overall
-    # device memory will be reduced but training could potentially be slower.
-    # eg. if total device is 4 and fsdp devices is 2; then the model will shard to 2 devices and run
-    # data parallel between 2 groups of devices.
+    # 大于 1 时启用 FSDP，并按指定设备数 shard；显存占用会下降，但训练可能变慢。
+    # 例如 total device 为 4 且 fsdp_devices 为 2 时，模型 shard 到 2 个设备，并在 2 组设备间做 data parallel。
     fsdp_devices: int = 1
 
     @property
@@ -658,10 +637,10 @@ class TrainConfig:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
 
-# Use `get_config` if you need to get a config by name in your code.
+# 代码中需要按名称取 config 时使用 `get_config`。
 _CONFIGS = [
     #
-    # Inference Aloha configs.
+    # ALOHA 推理配置。
     #
     TrainConfig(
         name="pi0_aloha",
@@ -698,7 +677,7 @@ _CONFIGS = [
         policy_metadata={"reset_pose": [0, -1.5, 1.5, 0, 0, 0]},
     ),
     #
-    # Inference DROID configs.
+    # DROID 推理配置。
     #
     TrainConfig(
         name="pi0_droid",
@@ -743,43 +722,37 @@ _CONFIGS = [
         ),
     ),
     #
-    # Fine-tuning Libero configs.
+    # LIBERO 微调配置。
     #
-    # These train configs define the hyperparameters for fine-tuning the base model on your own dataset.
-    # They are used to define key elements like the dataset you are training on, the base checkpoint you
-    # are using, and other hyperparameters like how many training steps to run or what learning rate to use.
-    # For your own dataset, you can copy this class and modify the dataset name, and data transforms based on
-    # the comments below.
+    # 这些 train configs 用于在自有 dataset 上微调 base model。
+    # 它们定义训练数据、base checkpoint、训练步数、学习率等关键超参数。
+    # 自有数据集可复制该配置，并按下方注释调整 dataset 名称和 data transforms。
     TrainConfig(
-        # Change the name to reflect your model and dataset.
+        # 将 name 改成能反映你的模型和 dataset 的名称。
         name="pi0_libero",
-        # Here you define the model config -- In this example we use pi0 as the model
-        # architecture and perform *full* finetuning. in the examples below we show how to modify
-        # this to perform *low-memory* (LORA) finetuning and use pi0-FAST as an alternative architecture.
+        # 这里定义 model config；本例使用 pi0 架构并执行 full finetuning。
+        # 下方示例展示如何改成低显存 LoRA 微调，或改用 pi0-FAST 架构。
         model=pi0_config.Pi0Config(),
-        # Here you define the dataset you are training on. In this example we use the Libero
-        # dataset. For your own dataset, you can change the repo_id to point to your dataset.
-        # Also modify the DataConfig to use the new config you made for your dataset above.
+        # Data contract: 这里定义训练 dataset；本例使用 LIBERO。
+        # 自有 dataset 需要将 repo_id 指向你的数据，并把 DataConfig 换成匹配该 dataset 的配置。
         data=LeRobotLiberoDataConfig(
             repo_id="physical-intelligence/libero",
             base_config=DataConfig(
-                # This flag determines whether we load the prompt (i.e. the task instruction) from the
-                # ``task`` field in the LeRobot dataset. If set to True, the prompt will show up in
-                # a field called ``prompt`` in the input dict. The recommended setting is True.
+                # Data contract: 为 True 时，从 LeRobot dataset 的 ``task`` 字段加载 prompt，并写入输入 dict 的 ``prompt``。
+                # 推荐保持 True。
                 prompt_from_task=True,
             ),
             extra_delta_transform=True,
         ),
-        # Here you define which pre-trained checkpoint you want to load to initialize the model.
-        # This should match the model config you chose above -- i.e. in this case we use the pi0 base model.
+        # 这里定义用于初始化模型的预训练 checkpoint；应与上面的 model config 匹配。
+        # 本例使用 pi0 base model。
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
-        # Below you can define other hyperparameters like the learning rate, number of training steps, etc.
-        # Check the base TrainConfig class for a full list of available hyperparameters.
+        # 其他超参数如 learning rate、训练步数等可在下方定义；完整列表见 TrainConfig。
         num_train_steps=30_000,
     ),
     TrainConfig(
         name="pi0_libero_low_mem_finetune",
-        # Here is an example of loading a pi0 model for LoRA fine-tuning.
+        # 示例：加载 pi0 model 进行 LoRA fine-tuning。
         model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
         data=LeRobotLiberoDataConfig(
             repo_id="physical-intelligence/libero",
@@ -788,42 +761,35 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=30_000,
-        # The freeze filter defines which parameters should be frozen during training.
-        # We have a convenience function in the model config that returns the default freeze filter
-        # for the given model config for LoRA finetuning. Just make sure it matches the model config
-        # you chose above.
+        # freeze_filter 定义训练时要 freeze 的参数。
+        # LoRA 微调时可用 model config 的 helper 生成默认 freeze filter，但必须与上方 model config 匹配。
         freeze_filter=pi0_config.Pi0Config(
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
-        # Turn off EMA for LoRA finetuning.
+        # LoRA fine-tuning 关闭 EMA。
         ema_decay=None,
     ),
     TrainConfig(
         name="pi0_fast_libero",
-        # Here is an example of loading a pi0-FAST model for full finetuning.
-        # Modify action_dim and action_horizon to match your dataset (action horizon is equal to
-        # the desired action chunk length).
-        # The max_token_len is the maximum number of (non-image) tokens the model can handle.
-        # This includes the tokenized prompt, proprioceptive state, and (FAST-tokenized) action tokens.
-        # Choosing this value too small may chop off tokens at the end of your sequence (the code will throw
-        # a warning), while choosing it too large will waste memory (since we pad each batch element to the
-        # max_token_len). A good rule of thumb is to use approx 180 for single-arm robots, and approx 250 for
-        # two-arm robots. Generally, err on the lower side here first, and potentially increase the value if
-        # you see many warnings being thrown during training.
+        # 示例：加载 pi0-FAST model 进行 full finetuning。
+        # Data contract: action_dim 和 action_horizon 需要匹配你的 dataset，action_horizon 即目标 action chunk 长度。
+        # max_token_len 是模型可处理的最大非图像 token 数，包括 tokenized prompt、proprioceptive state 和 FAST action tokens。
+        # 设得太小会截断序列末尾并触发 warning；设得太大会因为 batch padding 浪费显存。
+        # 经验上单臂约 180、双臂约 250，建议先偏小设置，若训练中出现大量 warning 再增大。
         model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180),
         data=LeRobotLiberoDataConfig(
             repo_id="physical-intelligence/libero",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=True,
         ),
-        # Note that we load the pi0-FAST base model checkpoint here.
+        # 这里加载 pi0-FAST base model checkpoint。
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_fast_base/params"),
         num_train_steps=30_000,
     ),
     TrainConfig(
         name="pi0_fast_libero_low_mem_finetune",
-        # Here is an example of loading a pi0-FAST model for LoRA finetuning.
-        # For setting action_dim, action_horizon, and max_token_len, see the comments above.
+        # 示例：加载 pi0-FAST model 进行 LoRA finetuning。
+        # action_dim、action_horizon 和 max_token_len 的设置参见上方说明。
         model=pi0_fast.Pi0FASTConfig(
             action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b_lora"
         ),
@@ -834,12 +800,11 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_fast_base/params"),
         num_train_steps=30_000,
-        # Again, make sure to match the model config above when extracting the freeze filter
-        # that specifies which parameters should be frozen during LoRA finetuning.
+        # 提取 LoRA fine-tuning 的 freeze_filter 时，仍需与上方 model config 保持一致。
         freeze_filter=pi0_fast.Pi0FASTConfig(
             action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b_lora"
         ).get_freeze_filter(),
-        # Turn off EMA for LoRA finetuning.
+        # LoRA fine-tuning 关闭 EMA。
         ema_decay=None,
     ),
     TrainConfig(
@@ -866,6 +831,8 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_faster_libero",
+        # FASTER: LIBERO 的 FASTER 冒烟测试配置。
+        # NOTE: max_delay=0 会关闭历史 action_prefix 采样；若训练遇到 randint 边界问题，优先检查这里。
         model=pi0_config.Pi0FasterConfig(
             pi05=True, action_horizon=10, discrete_state_input=False, max_delay=0, mix_prob=0.5, alpha=0.6, u0=0.9
         ),
@@ -909,6 +876,8 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_faster_calvin",
+        # FASTER: CALVIN 复用同一套 FASTER 机制，用来验证更长的语言条件任务链。
+        # NOTE: max_delay=0 会默认关闭 prefix mode；若需要测 delay/action_prefix，需要显式改配置。
         model=pi0_config.Pi0FasterConfig(
             pi05=True, action_horizon=10, discrete_state_input=False, max_delay=0, mix_prob=0.5, alpha=0.6, u0=0.9
         ),
@@ -930,10 +899,10 @@ _CONFIGS = [
         num_workers=8,
     ),
     #
-    # Fine-tuning Aloha configs.
+    # ALOHA 微调配置。
     #
-    # This is a test config that is used to illustate how train on a custom LeRobot dataset.
-    # For instructions on how to convert and train on your own Aloha dataset see examples/aloha_real/README.md
+    # 这是自定义 LeRobot dataset 训练流程的测试配置。
+    # 自有 ALOHA dataset 的转换和训练说明见 examples/aloha_real/README.md。
     TrainConfig(
         name="pi0_aloha_pen_uncap",
         model=pi0_config.Pi0Config(),
@@ -994,12 +963,11 @@ _CONFIGS = [
         batch_size=64,
     ),
     #
-    # Fine-tuning DROID configs.
+    # DROID 微调配置。
     #
     TrainConfig(
-        # This config is for fine-tuning pi0-FAST-base on the *full* DROID dataset.
-        # We use RLDS data loading to make training on this large dataset tractable.
-        # For fine-tuning on your own DROID dataset, see below.
+        # Data contract: 该配置用于在完整 DROID dataset 上微调 pi0-FAST-base。
+        # 使用 RLDS data loading 是为了让大规模 dataset 训练可承载；自有 DROID dataset 微调见下方配置。
         name="pi0_fast_full_droid_finetune",
         model=pi0_fast.Pi0FASTConfig(
             action_dim=8,
@@ -1008,7 +976,7 @@ _CONFIGS = [
         ),
         data=RLDSDroidDataConfig(
             repo_id="droid",
-            # Set this to the path to your DROID RLDS dataset (the parent directory of the `droid` directory).
+            # Data contract: 这里应设置为 DROID RLDS dataset 路径，即 `droid` 目录的父目录。
             rlds_data_dir="<path_to_droid_rlds_dataset>",
             action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
         ),
@@ -1019,17 +987,16 @@ _CONFIGS = [
             decay_steps=1_000_000,
             decay_lr=5e-5,
         ),
-        num_train_steps=100_000,  # 100k steps should be sufficient, takes ~2 days on 8x H100s
+        num_train_steps=100_000,  # 100k steps 通常足够，在 8x H100 上约需 2 天
         batch_size=256,
         log_interval=100,
         save_interval=5000,
         keep_period=20_000,
-        num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
+        num_workers=0,  # NOTE: RLDS DataLoader 内部处理 multiprocessing，要求 num_workers=0
     ),
     TrainConfig(
-        # This config is for fine-tuning pi05 on the *full* DROID dataset.
-        # We use RLDS data loading to make training on this large dataset tractable.
-        # For fine-tuning on your own DROID dataset, see below.
+        # Data contract: 该配置用于在完整 DROID dataset 上微调 pi05。
+        # 使用 RLDS data loading 是为了让大规模 dataset 训练可承载；自有 DROID dataset 微调见下方配置。
         name="pi05_full_droid_finetune",
         model=pi0_config.Pi0Config(
             pi05=True,
@@ -1038,7 +1005,7 @@ _CONFIGS = [
         ),
         data=RLDSDroidDataConfig(
             repo_id="droid",
-            # Set this to the path to your DROID RLDS dataset (the parent directory of the `droid` directory).
+            # Data contract: 这里应设置为 DROID RLDS dataset 路径，即 `droid` 目录的父目录。
             rlds_data_dir="/mnt/pi-data/kevin",
             action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
             assets=AssetsConfig(
@@ -1058,24 +1025,25 @@ _CONFIGS = [
         log_interval=100,
         save_interval=5000,
         keep_period=10_000,
-        num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
+        num_workers=0,  # NOTE: RLDS DataLoader 内部处理 multiprocessing，要求 num_workers=0
     ),
     TrainConfig(
-        # This config is for fine-tuning pi05-DROID on a custom (smaller) DROID dataset.
-        # Here, we use LeRobot data format (like for all other fine-tuning examples)
-        # To convert your custom DROID dataset (<10s of hours) to LeRobot format, see examples/droid/convert_droid_data_to_lerobot.py
+        # Data contract: 这个配置用于在自定义小规模 DROID 数据上微调 pi05-DROID，数据格式仍走 LeRobot。
+        # 转换脚本见 examples/droid/convert_droid_data_to_lerobot.py。
         name="pi05_droid_finetune",
+        # NOTE: 这里是普通 Pi0Config。若要在 Franka/DROID-style 数据上测 FASTER streaming，
+        # 应新增 Pi0FasterConfig 配置，而不是直接对它开启 --streaming。
         model=pi0_config.Pi0Config(
             pi05=True,
-            action_dim=32,  # pi05 is trained with 32-dim actions
+            action_dim=32,  # pi05 使用 32-D actions 训练
             action_horizon=16,
         ),
         data=LeRobotDROIDDataConfig(
-            # Replace with your custom DROID LeRobot dataset repo id.
+            # Data contract: 替换成你的自定义 DROID LeRobot dataset repo id。
             repo_id="your_hf_username/my_droid_dataset",
             base_config=DataConfig(prompt_from_task=True),
             assets=AssetsConfig(
-                # Important: reuse the original DROID norm stats during fine-tuning!
+                # NOTE: 微调 DROID 契约数据时必须复用原始 DROID norm stats，避免 action/state 标度漂移。
                 assets_dir="gs://openpi-assets/checkpoints/pi05_droid/assets",
                 asset_id="droid",
             ),
@@ -1085,7 +1053,7 @@ _CONFIGS = [
         batch_size=32,
     ),
     #
-    # ALOHA Sim configs. This config is used to demonstrate how to train on a simple simulated environment.
+    # ALOHA Sim 配置，用于演示如何在简单仿真环境上训练。
     #
     TrainConfig(
         name="pi0_aloha_sim",
@@ -1114,6 +1082,8 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_rtc_agilex",
+        # FASTER: RTC-style 训练使用 delay/action_prefix 条件，但 mix_prob=0 表示只用 constant schedule，
+        # 不混入 HAS。
         model=pi0_config.Pi0FasterConfig(pi05=True, max_delay=10, mix_prob=0.0),
         data=LeRobotAgilexDataConfig(
             repo_id="your/dataset",
@@ -1128,6 +1098,7 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_faster_agilex",
+        # FASTER: Agilex 这里启用 max_delay，可同时覆盖 action_prefix 与 HAS 的训练/推理路径。
         model=pi0_config.Pi0FasterConfig(pi05=True, max_delay=10, mix_prob=0.5, alpha=0.6, u0=0.9),
         data=LeRobotAgilexDataConfig(
             repo_id="your/dataset",
@@ -1141,7 +1112,7 @@ _CONFIGS = [
         save_interval=10_000,
     ),
     #
-    # Debugging configs.
+    # 调试配置。
     #
     TrainConfig(
         name="debug",
@@ -1175,7 +1146,7 @@ _CONFIGS = [
         exp_name="debug_pi05",
         wandb_enabled=False,
     ),
-    # RoboArena & PolaRiS configs.
+    # RoboArena 与 PolaRiS 配置。
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
 ]
