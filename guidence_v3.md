@@ -42,6 +42,30 @@ prompt/images/state
 
 它没有单独配置 `outputs`，因为模型本身已经直接返回连续 actions。
 
+### Pi0Faster 如何分流
+
+`Pi0Faster` 的配置入口是 [Pi0FasterConfig](C:/QClaw/FASTER_hy/src/openpi/models/pi0_config.py:112)，但它没有单独的 `ModelType.PI0_FASTER`。关键代码在 [Pi0FasterConfig.model_type](C:/QClaw/FASTER_hy/src/openpi/models/pi0_config.py:141)：
+
+```text
+pi05=True  -> model_type 返回 PI05
+pi05=False -> model_type 返回 PI0
+```
+
+所以 `Pi0Faster` 在 [ModelTransformFactory](C:/QClaw/FASTER_hy/src/openpi/training/config.py:104) 里不会进入 `PI0_FAST` 分支，而是复用普通连续 action 模型的 transform：
+
+```text
+Pi0FasterConfig(pi05=True)
+-> ModelType.PI05
+-> 进入 PI05 分支
+-> TokenizePrompt
+-> PadStatesAndActions(action_dim, action_horizon)
+-> outputs 为空
+```
+
+这点非常重要：`Pi0Faster` 虽然名字里有 `Faster`，但它不是 `PI0_FAST`，也不需要 `ExtractFASTActions`。它的输入还是 prompt/image/state，输出仍是连续 action chunk；只是模型内部的 denoising schedule、prefix 条件和 streaming 机制变了。
+
+代码里的 FASTER 配置基本都走 `pi05=True`，例如 [pi05_faster_libero](C:/QClaw/FASTER_hy/src/openpi/training/config.py:876)、[pi05_faster_calvin](C:/QClaw/FASTER_hy/src/openpi/training/config.py:921)、[pi05_faster_agilex](C:/QClaw/FASTER_hy/src/openpi/training/config.py:1143)，因此它们通常会复用 [ModelTransformFactory 的 PI05 分支](C:/QClaw/FASTER_hy/src/openpi/training/config.py:140)。
+
 ### PI0_FAST 分支
 
 入口是 [ModelTransformFactory 的 PI0_FAST 分支](C:/QClaw/FASTER_hy/src/openpi/training/config.py:168)。
@@ -98,6 +122,58 @@ return x_0
 -> Unnormalize
 -> 环境 Outputs adapter
 -> 可执行 action
+```
+
+## Pi0Faster 的 action 生成链路
+
+模型类入口是 [Pi0Faster](C:/QClaw/FASTER_hy/src/openpi/models/pi0_faster.py:67)。
+
+它的生成链路最像 `PI0`，不是 `PI0_FAST`：
+
+```text
+noise x_t
+-> embed_suffix(observation, x_t, time 或 HAS time schedule)
+-> PaliGemma + action expert
+-> action_out_proj 得到 v_t
+-> x_t + dt * v_t
+-> 循环或 scan 到 t=0
+-> return x_0
+```
+
+也就是说，[Pi0Faster.sample_actions](C:/QClaw/FASTER_hy/src/openpi/models/pi0_faster.py:284) 返回的仍然是连续 action chunk，而不是 token。关键返回在 [Pi0Faster.sample_actions](C:/QClaw/FASTER_hy/src/openpi/models/pi0_faster.py:385) 的 `const/HAS` 分支之后：
+
+```python
+return x_0
+```
+
+它和 `PI0` 的差别主要在三处：
+
+1. `delay/action_prefix`：推理时可以传入已经知道或已经执行的前缀动作。代码入口在 [Pi0Faster.sample_actions 参数](C:/QClaw/FASTER_hy/src/openpi/models/pi0_faster.py:291)，训练时对应 [prefix_action_mask](C:/QClaw/FASTER_hy/src/openpi/models/pi0_faster.py:215)。
+2. `HAS`：用 [compute_HAS](C:/QClaw/FASTER_hy/src/openpi/models/pi0_faster.py:257) 给不同 horizon 位置分配不同的 denoising 时间，让近端动作更早 ready。
+3. streaming：用 [sample_actions_streaming_init](C:/QClaw/FASTER_hy/src/openpi/models/pi0_faster.py:404) 预计算 KV cache 和 ready schedule，再用 [sample_actions_streaming_step](C:/QClaw/FASTER_hy/src/openpi/models/pi0_faster.py:463) 一步步更新动作并返回 `newly_ready`。
+
+所以 `Pi0Faster` 的完整非 token 输出路径是：
+
+```text
+Pi0Faster.sample_actions()
+-> x_0 连续 action chunk
+-> Policy.infer 暂存为 {"actions": x_0}
+-> model_transforms.outputs 为空
+-> Unnormalize
+-> environment Outputs adapter
+-> executable actions
+```
+
+streaming 路径则是：
+
+```text
+Pi0Faster.sample_actions_streaming_init()
+-> 预计算 prefix KV cache / HAS schedule / ready mask
+-> Pi0Faster.sample_actions_streaming_step()
+-> 每步得到 x_next 和 newly_ready
+-> Policy.infer_streaming 对 newly_ready 做 output_transform
+-> callback 提前发出 partial actions
+-> 最后返回 final action chunk
 ```
 
 ## PI0_FAST 的 action 生成链路
