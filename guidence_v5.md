@@ -1,19 +1,20 @@
 # PI0 与 FASTER / Pi0Faster 的理念和代码链路对比指南
 
-> 本文档融合 `guidence_v1.md` ~ `guidence_v4.md` 与 `compare.md` 的分析，用“理念 + 函数调用流 + 每个模块输出”的方式说明：原始 PI0/PI0.5 和 FASTER 论文、本仓库 `Pi0Faster` 实现到底差在哪里。
+> 本文档用“理念 + 函数调用流 + 每个模块输出”的方式说明：原始 PI0/PI0.5 和 FASTER 论文、本仓库 `Pi0Faster` 实现到底差在哪里。
 
 ## 0. 先澄清三个名字
 
 | 名字 | 代码入口 | 本质 | 输出是否是连续 action | 和 FASTER 论文关系 |
 |---|---|---|---|---|
 | `PI0` / `PI0.5` | [Pi0](C:/QClaw/FASTER_hy/src/openpi/models/pi0.py:66), [Pi0Config](C:/QClaw/FASTER_hy/src/openpi/models/pi0_config.py:20) | flow matching 连续动作生成器 | 是，`sample_actions()` 返回 `x_0` | FASTER 的基础模型范式 |
-| `PI0_FAST` | [Pi0FAST](C:/QClaw/FASTER_hy/src/openpi/models/pi0_fast.py:134) | FAST action token 自回归生成器 | 否，先返回 `output_tokens` | 不是本文 FASTER；名字容易混淆 |
-| `Pi0Faster` | [Pi0Faster](C:/QClaw/FASTER_hy/src/openpi/models/pi0_faster.py:67), [Pi0FasterConfig](C:/QClaw/FASTER_hy/src/openpi/models/pi0_config.py:106) | 连续 action flow + prefix/HAS/streaming | 是，仍返回连续 `x_0` | 本仓库对应 FASTER 论文的核心实现 |
+| `PI0_FAST` | [Pi0FAST](C:/QClaw/FASTER_hy/src/openpi/models/pi0_fast.py:134) | FAST action token 自回归生成器 | 否，先返回 `output_tokens` | 不是FASTER；名字容易混淆 |
+| `Pi0Faster` | [Pi0Faster](C:/QClaw/FASTER_hy/src/openpi/models/pi0_faster.py:67), [Pi0FasterConfig](C:/QClaw/FASTER_hy/src/openpi/models/pi0_config.py:106) | 连续 action flow + prefix/HAS/streaming | 是，仍返回连续 `x_0` | FASTER 论文的核心实现 |
 
 最重要的一点：`Pi0Faster` 不是 `PI0_FAST`。`PI0_FAST` 把动作变成 token 来生成，再由 [ExtractFASTActions](C:/QClaw/FASTER_hy/src/openpi/transforms.py:294) 解码回连续动作；`Pi0Faster` 不走 token action 路线，它保留 PI0/PI0.5 的连续 flow action 生成，只改变时间调度、前缀条件和流式输出。
 
-## 1. 理念对比
+知乎的PI0_FAST论文解析：https://zhuanlan.zhihu.com/p/1910755399646287695
 
+## 1. 理念对比
 | 维度 | PI0 / PI0.5 | FASTER / Pi0Faster | 关键代码 |
 |---|---|---|---|
 | 核心目标 | 生成高质量完整 action chunk | 降低机器人对环境变化的首次反应延迟，即 TTFA | [Pi0Faster.sample_actions_streaming_init](C:/QClaw/FASTER_hy/src/openpi/models/pi0_faster.py:365) |
