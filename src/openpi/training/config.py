@@ -103,61 +103,104 @@ class GroupFactory(Protocol):
 @dataclasses.dataclass(frozen=True)
 class ModelTransformFactory(GroupFactory):
     """Creates model transforms for standard pi0 models."""
-
+    """
+    已在 config.py (line 110) 的 ModelTransformFactory.__call__ 里加了中文标注。
+    标注内容覆盖了三个选项：
+        PI0：原版 pi0，默认 Paligemma prompt tokenizer，只做输入侧 transform。
+        PI05：pi0.5 路径，Pi0FasterConfig 也走这里，重点标明了 FASTER 为什么不单独建 PI0_FASTER 分支。
+        PI0_FAST：FAST tokenizer 路径，标明了输入编码和输出 action 解码两部分。
+    """
     # Data contract: 输入样本没有 "prompt" 时注入该默认 prompt，保证后续 tokenizer 总能拿到语言条件。
     default_prompt: str | None = None
 
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
+        """根据 model_config.model_type 选择模型侧输入/输出 transforms。"""
+        # model_type 是总开关：不同模型家族需要不同的 prompt/action 编码方式。
         match model_config.model_type:
+            # 选项 1: PI0 原版模型。使用 Paligemma 文本 tokenizer，action horizon 使用默认 pad 逻辑。
             case _model.ModelType.PI0:
+                # Group 把多个 transform 串成一条 pipeline；这里只定义模型输入侧 transforms。
                 return _transforms.Group(
+                    # inputs 中 transform 按顺序执行：prompt -> image -> token -> state/action shape。
                     inputs=[
+                        # 如果样本没有 "prompt"，就写入 default_prompt；已有 prompt 时不覆盖。
                         _transforms.InjectDefaultPrompt(self.default_prompt),
+                        # 把所有 image slot resize 到模型视觉塔期望的 224x224。
                         _transforms.ResizeImages(224, 224),
+                        # 把 prompt 文本转成 Paligemma token，写入 tokenized_prompt / tokenized_prompt_mask。
                         _transforms.TokenizePrompt(
+                            # max_token_len 来自模型配置，限制语言 token 的最大长度。
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
                         ),
+                        # 把 state/actions 的最后一维 pad 到模型 action_dim；PI0 这里不显式传 action_horizon。
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
                 )
+            # 选项 2: PI05 模型。FASTER 的 Pi0FasterConfig 也会走这个分支，因为它复用 PI05 数据格式。
             case _model.ModelType.PI05:
+                # 这个分支需要读取 Pi0Config/Pi0FasterConfig 特有字段，例如 discrete_state_input/action_horizon。
                 assert isinstance(model_config, pi0_config.Pi0Config) or isinstance(
                     model_config, pi0_config.Pi0FasterConfig
                 )
                 # FASTER: Pi0FasterConfig.model_type 仍返回 PI05/PI0，因此复用常规 pi05/pi0 transform 路径，
                 # 不新增单独的 PI0_FASTER 分支。
+                # PI05/FASTER 都返回同一类输入 pipeline，只是在 token 和 horizon 配置上比 PI0 多一些控制项。
                 return _transforms.Group(
+                    # inputs 中 transform 按顺序执行；FASTER 的 action_prefix 也会随这些输入 transform 一起处理。
                     inputs=[
+                        # 补默认 prompt，保证语言条件一定存在。
                         _transforms.InjectDefaultPrompt(self.default_prompt),
+                        # 统一图像大小，保证后续视觉 tokenizer 输入 shape 固定。
                         _transforms.ResizeImages(224, 224),
+                        # 使用 Paligemma tokenizer；PI05 可选择是否把 state 离散化后拼进语言 token。
                         _transforms.TokenizePrompt(
+                            # 构造文本 tokenizer，token 长度由模型配置控制。
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                            # discrete_state_input=True 时，state 会以离散 token 形式进入 prompt/token 序列。
                             discrete_state_input=model_config.discrete_state_input,
                         ),
+                        # 同时 pad action_dim 和 action_horizon；FASTER 需要固定 horizon 来处理 action_prefix/delay。
                         _transforms.PadStatesAndActions(model_config.action_dim, model_config.action_horizon),
                     ],
                 )
+            # 选项 3: PI0_FAST 模型。它可以理解为一条经过优化/替换的 action 生成路径：
+            # 模型不直接返回连续 actions，而是自回归生成 FAST action tokens，再由 outputs 解码回连续动作。
             case _model.ModelType.PI0_FAST:
+                # 若配置没有指定 tokenizer 类，就使用默认 FASTTokenizer。
                 tokenizer_cls = (
                     _tokenizer.FASTTokenizer
                     if model_config.fast_model_tokenizer is None
                     else model_config.fast_model_tokenizer
                 )
+                # 若配置没有指定 tokenizer 参数，就传空 kwargs；否则透传自定义 tokenizer 参数。
                 tokenizer_kwargs = (
                     {} if model_config.fast_model_tokenizer_kwargs is None else model_config.fast_model_tokenizer_kwargs
                 )
+                # FAST pipeline 同时定义 inputs 和 outputs：输入要编码，输出要从 FAST token 解码回连续 action。
+                # 这就是 PI0_FAST 和 PI0/PI05 最大的 transform 差异；普通模型 sample_actions 已经返回连续 actions。
                 return _transforms.Group(
+                    # inputs 负责把 observation/prompt 转成 FAST 模型可读的输入。
                     inputs=[
+                        # 补默认 prompt，保持和其他模型家族一致的 prompt 契约。
                         _transforms.InjectDefaultPrompt(self.default_prompt),
+                        # 视觉输入仍统一 resize 到 224x224。
                         _transforms.ResizeImages(224, 224),
+                        # FAST 输入 tokenizer 会把 prompt 和动作相关上下文编码成 FAST 模型格式。
                         _transforms.TokenizeFASTInputs(
+                            # 用选定 tokenizer 类和参数创建 tokenizer 实例。
                             tokenizer_cls(model_config.max_token_len, **tokenizer_kwargs),
                         ),
                     ],
+                    # outputs 负责把模型输出 token 还原成环境可执行的连续 actions；
+                    # 如果跳过这一步，后续 Unnormalize 会把离散 token 误当成归一化后的连续 action。
                     outputs=[
+                        # 从 FAST 输出中提取 action chunk，并恢复到指定 horizon/dim。
                         _transforms.ExtractFASTActions(
+                            # 输出解码必须使用和输入编码一致的 tokenizer 配置。
                             tokenizer_cls(model_config.max_token_len, **tokenizer_kwargs),
+                            # action_horizon 决定一次输出多少步 action。
                             action_horizon=model_config.action_horizon,
+                            # action_dim 决定每步 action 的维度。
                             action_dim=model_config.action_dim,
                         )
                     ],

@@ -82,8 +82,13 @@ def create_trained_policy(
             *data_config.model_transforms.inputs,
         ],
         output_transforms=[
+            # 模型侧 outputs 必须最先执行，因为有些模型家族并不直接输出连续 action。
+            # 典型例子是 PI0_FAST：它用 FAST action tokens 优化/替换 action 生成路径；
+            # ExtractFASTActions 必须先把 token 解码成连续 action chunk，后面才能反归一化。
             *data_config.model_transforms.outputs,
+            # 经过模型专属解码后，actions 才回到“归一化后的连续 action 空间”。
             transforms.Unnormalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+            # data/repack outputs 再把连续 action chunk 裁剪或重映射成环境/机器人真正消费的契约。
             *data_config.data_transforms.outputs,
             *repack_transforms.outputs,
         ],
