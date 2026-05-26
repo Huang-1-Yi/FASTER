@@ -268,10 +268,8 @@ def create_data_loader(
     #     PadStatesAndActions(action_dim=32, action_horizon=10)
     logging.info(f"data_config: {data_config}")
 
-    # 分支 1：RLDS 数据格式。
-    # 判断条件是 data_config.rlds_data_dir 不为空；目前仓库里主要是 DROID 这类大规模 RLDS 数据会走这里。
-    # 这条分支会调用 create_rlds_data_loader(...)，里面再创建 RLDSDataLoader。
-    # 注意：pi05_libero 的 rlds_data_dir 是 None，所以它不会走这个分支。
+    # rlds_data_dir 不为空时，表示这个配置走 RLDS 数据格式，目前主要用于 DROID。
+    # RLDS loader 自己已经按 batch 迭代，所以后面会走 create_rlds_data_loader。
     if data_config.rlds_data_dir is not None:
         return create_rlds_data_loader(
             data_config,
@@ -283,11 +281,10 @@ def create_data_loader(
             skip_norm_stats=skip_norm_stats,
             framework=framework,
         )
-    # 分支 2：LeRobot / 普通随机访问数据集。
-    # pi05_libero 的 physical-intelligence/libero 走这里：先创建 LeRobotDataset，
-    # 再用 torch.utils.data.DataLoader 做 shuffle、batch 和多进程读取。
-    # 名字里有 torch 只是因为“取数器”用 PyTorch；当 framework="jax" 时，batch 最终仍会转成 JAX array，
-    # 并按 sharding 放到 JAX 设备上参与训练。
+    
+    # 大多数 LeRobot 数据集，包括 pi05_libero 的 physical-intelligence/libero，都走这里。
+    # 名字叫 create_torch_data_loader，是因为底层用 torch.utils.data.DataLoader 负责多进程取数；
+    # 但 framework="jax" 时，取出的 numpy batch 会再转换成 JAX array，并按 sharding 放到设备上。
     return create_torch_data_loader(
         data_config,
         model_config=config.model,
@@ -399,22 +396,11 @@ def create_rlds_data_loader(
             number of batches in the dataset, the data loader will loop over the dataset.
             If not provided, will iterate over the dataset indefinitely.
     """
-    # create_data_loader 只有在 data_config.rlds_data_dir 不为空时才会调用到这里。
-    # RLDS 是 TensorFlow/robotics 常见的轨迹数据格式；本仓库目前把它主要用于 DROID 数据。
-    # 和 LeRobot 分支不同，RLDS dataset 在 create_rlds_dataset 里就已经按 batch_size 组织数据，
-    # 因此这里不再使用 torch.utils.data.DataLoader。
     if framework == "pytorch":
         raise NotImplementedError("PyTorch RLDS data loader is not supported yet")
-
-    # DroidRldsDataset 会从 rlds_data_dir 读取轨迹，并按 action_horizon 生成 action chunk。
-    # shuffle 控制轨迹/样本顺序；action_space 和 datasets 来自 DataConfig，用于选择 DROID 动作空间和子数据集。
     dataset = create_rlds_dataset(data_config, action_horizon, batch_size, shuffle=shuffle)
-
-    # RLDS dataset 产出的 batch 已经带 batch 维；transform_iterable_dataset 会把 batch 拆成单样本做 transform，
-    # 再重新 stack 回 batch。这样可以复用普通样本级 transform，例如 Normalize、TokenizePrompt、PadStatesAndActions。
     dataset = transform_iterable_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats, is_batched=True)
 
-    # RLDSDataLoader 是一层很薄的包装：负责把 batch 放到 JAX sharding 上，并让数据集耗尽后重新开始迭代。
     data_loader = RLDSDataLoader(
         dataset,
         sharding=sharding,
@@ -545,13 +531,11 @@ class RLDSDataLoader:
         self._dataset = dataset
         self._num_batches = num_batches
 
-        # 当前实现不支持多 JAX process 同时读 RLDS；多机/多进程训练需要额外做数据切分。
         if jax.process_count() > 1:
             raise NotImplementedError("Data loading with multiple processes is not supported.")
 
         if sharding is None:
-            # sharding 表示 batch 如何摆到 JAX 设备上。
-            # 没有显式传入时，默认按 batch 维做数据并行；单卡时可以理解为整个 batch 放到这一张卡。
+            # Use data parallel sharding by default.
             sharding = jax.sharding.NamedSharding(
                 jax.sharding.Mesh(jax.devices(), ("B",)),
                 jax.sharding.PartitionSpec("B"),
@@ -563,7 +547,6 @@ class RLDSDataLoader:
     def __iter__(self):
         num_items = 0
         while True:
-            # RLDS dataset 是 iterable；一轮读完后，外层 while 会重新创建 iterator，让训练可以持续取 batch。
             data_iter = iter(self._dataset)
             while True:
                 if self._num_batches is not None and num_items >= self._num_batches:
@@ -573,7 +556,6 @@ class RLDSDataLoader:
                 except StopIteration:
                     break  # We've exhausted the dataset. Create a new iterator and start over.
                 num_items += 1
-                # 把本地 numpy/JAX batch 转成带 sharding 的 JAX array，交给 JIT 后的 train_step。
                 yield jax.tree.map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)
 
 
