@@ -78,6 +78,12 @@ class Policy(BasePolicy):
 
     @override
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
+        """普通完整 chunk 推理入口。
+
+        对应 guidence_v5.md 的 2.1：不管底层是 PI0、PI0.5 还是 Pi0Faster，
+        这里都先把环境 obs 变成模型统一输入，再调用一次 ``model.sample_actions``。
+        调用方会等整个 action chunk 全部 denoise 完成，最后一次性拿到完整 actions。
+        """
         # transform 可能原地修改输入，因此先复制一层 tree。
         inputs = jax.tree.map(lambda x: x, obs)
 
@@ -123,6 +129,8 @@ class Policy(BasePolicy):
             sample_kwargs["action_prefix"] = inputs["action_prefix"]
 
         actions = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
+        # 约定：sample_actions 返回的是模型归一化空间中的完整 action chunk。
+        # 后续 output_transform 会负责把它还原到环境/机器人真正消费的动作尺度和维度。
         outputs = {"state": inputs["state"], "actions": actions}
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
@@ -149,6 +157,11 @@ class Policy(BasePolicy):
 
         Massively improves performance by breaking JAX Host-Device sync barriers
         and utilizing asynchronous execution without `io_callback`.
+
+        对应 guidence_v5.md 的 2.2：Pi0Faster 不再一次性调用 sample_actions，
+        而是先 init 出 KV cache、HAS 时间表和 ready mask，再由 Python host loop
+        多次调用 streaming step。每一步如果产生 newly_ready，就立刻走输出
+        transform 并通过 callback 发给 server/client。
         """
         assert not self._is_pytorch_model, "Streaming inference is only supported for JAX models"
         assert (

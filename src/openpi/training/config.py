@@ -332,9 +332,18 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # 调用入口：data_loader.create_data_loader(...) 会执行 config.data.create(config.assets_dirs, config.model)。
+        # 对 `pi05_libero`，config.data 就是 LeRobotLiberoDataConfig，所以会进入当前 create。
+        # 这个函数不直接读取数据样本；它只组装“之后每个样本要按什么顺序转换”的 DataConfig。
+
+        # assets_dirs 是当前 config 的 assets 目录，例如 assets/pi05_libero。
+        # create_base_config 会从这里加载 normalization stats，后面的 Normalize transform 会用这些统计量归一化 state/actions。
+        # model_config 是模型配置；对 `pi05_libero`，它是 Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False)。
+
         # Data contract: repack 只作用于离线 dataset，不作用于在线推理；它把 LeRobot 转换脚本产出的键名
         # 对齐到 LIBERO 推理 adapter 的输入契约。自定义 dataset 时，先看 policy server 实际传入哪些 key，
         # 再把这里的映射改成“dataset key -> 推理契约 key”。
+        # 这里左边是转换后的统一 key，右边是 LeRobot dataset 原始 key；例如把原始 "image" 放到 "observation/image"。
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
@@ -351,6 +360,9 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
         # Data contract: data_transforms 同时用于训练和推理；inputs 把 LIBERO 契约转成 openpi 统一输入，
         # outputs 只在推理后把模型输出转回环境 action。若换自定义 adapter，就替换这里的 inputs/outputs。
+        # LiberoInputs 会把 observation/image、observation/wrist_image、observation/state 转成：
+        # state、image dict、image_mask dict、actions、prompt，这正是 Observation.from_dict 前需要的格式。
+        # model_type 来自 model_config；pi05_libero 的 model_type 是 PI05，因此右腕占位图会被 mask 掉。
         data_transforms = _transforms.Group(
             inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
             outputs=[libero_policy.LiberoOutputs()],
@@ -368,9 +380,13 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
         # Data contract: model_transforms 处理 prompt tokenization、图像尺寸、state/action padding 等模型侧格式；
         # 这层与具体 dataset key 无关，自定义数据集通常只改 repack/data_transforms。
+        # 对 pi05_libero，这里会进入 ModelTransformFactory 的 PI05 分支：
+        # InjectDefaultPrompt -> ResizeImages(224, 224) -> TokenizePrompt -> PadStatesAndActions(32, 10)。
         model_transforms = ModelTransformFactory()(model_config)
 
         # Data contract: 返回的三层 transform 让离线样本和在线 obs 走同一口径，避免训练/部署格式漂移。
+        # dataclasses.replace 表示：先拿 create_base_config 生成的基础 DataConfig，再把 LIBERO 专属 transforms 填进去。
+        # 最终 data_loader.transform_dataset 会按 repack -> data_transforms -> Normalize -> model_transforms 的顺序处理样本。
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             repack_transforms=repack_transform,

@@ -45,6 +45,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
 
     @override
     def infer(self, obs: Dict) -> Dict:  # noqa: UP006
+        # 2.1 普通完整 chunk 推理：客户端发出一次 obs，然后阻塞等待服务端返回完整 action dict。
         data = self._packer.pack(obs)
         self._ws.send(data)
         response = self._ws.recv()
@@ -58,8 +59,8 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
         """Streaming inference for use with ``StreamingWebsocketPolicyServer``.
 
         Sends the observation, then reads messages until the server sends the
-        final result.  For each *partial* message the optional ``on_actions_ready``
-        callback is invoked with ``(step, action_indices, actions)``.
+        final result. For each *partial* message the optional ``on_actions_ready``
+        callback is invoked with the newly ready actions.
 
         Returns the final complete result dict (same shape as ``infer``).
         """
@@ -76,8 +77,10 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                 if on_actions_ready is not None:
                     # FASTER: partial message 携带可提前执行的 ready actions，final 再返回完整 horizon；
                     # callback 只收到 actions，保持客户端执行路径轻量。
+                    # 对应 2.2：执行端可以在 final 到来前先消费这些近端 actions。
                     on_actions_ready(msg["actions"])
             else:
+                # final message 与普通 infer 一样是完整 action dict，只是它前面可能已经发过 partial。
                 return msg
 
     @override

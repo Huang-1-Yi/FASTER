@@ -1,0 +1,45 @@
+git clone --recurse-submodules https://github.com/Huang-1-Yi/FASTER.git
+cd  FASTER
+
+# 如果已经下载了github没有配仿真环境:
+git submodule update --init --recursive
+
+# 如果没安装 curl
+sudo apt-get update
+sudo apt-get install curl
+
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+GIT_LFS_SKIP_SMUDGE=1 uv sync
+GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+
+# 下载数据集
+
+uv run hf download physical-intelligence/libero --repo-type dataset   --revision v2.0 --local-dir ~/.cache/huggingface/lerobot/physical-intelligence/libero --max-workers 4
+
+# 如果报错：“Error: Invalid value. Unknown scheme for proxy URL URL('socks://127.0.0.1:7897/'”
+“
+(base) hy@a:~/Desktop/FASTER$ env | grep -i proxy
+no_proxy=localhost,127.0.0.1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,::1
+https_proxy=http://127.0.0.1:7897/
+NO_PROXY=localhost,127.0.0.1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,::1
+HTTPS_PROXY=http://127.0.0.1:7897/
+HTTP_PROXY=http://127.0.0.1:7897/
+http_proxy=http://127.0.0.1:7897/
+ALL_PROXY=socks://127.0.0.1:7897/
+all_proxy=socks://127.0.0.1:7897/
+”
+问题在于：“
+ALL_PROXY=socks://127.0.0.1:7897/
+all_proxy=socks://127.0.0.1:7897/
+”
+# --active 
+uv run scripts/compute_norm_stats.py --config-name pi05_libero                    # 给 pi05 配置也算一次
+uv run scripts/compute_norm_stats.py --config-name pi05_faster_libero    # 再给 FASTER 配置也算一次
+
+
+
+export ALL_PROXY=socks5h://127.0.0.1:7897
+export all_proxy=socks5h://127.0.0.1:7897
+export ALL_PROXY=http://127.0.0.1:7897
+export all_proxy=http://127.0.0.1:7897

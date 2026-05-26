@@ -222,6 +222,12 @@ class Pi0(_model.BaseModel):
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
     ) -> _model.Actions:
+        """PI0 普通完整 chunk 推理。
+
+        对应 guidence_v5.md 的 2.1 和 6.1：从一整块 action noise 出发，
+        所有 horizon 位置共享同一个 scalar time，迭代 denoise 到 t=0 后，
+        一次性返回完整 ``[batch, action_horizon, action_dim]`` 连续动作。
+        """
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
@@ -231,6 +237,8 @@ class Pi0(_model.BaseModel):
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
         # first fill KV cache with a forward pass of the prefix
+        # 2.1 普通 chunk 的模型内部第一步：图像、prompt、state 形成 observation prefix。
+        # prefix 与 denoising step 无关，因此只做一次 prefill，并把 KV cache 复用于后续所有 step。
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
@@ -238,6 +246,8 @@ class Pi0(_model.BaseModel):
 
         def step(carry):
             x_t, time = carry
+            # 每一步把当前动作草稿 x_t 和当前 scalar time 编成 suffix token。
+            # PI0 的关键简化是：同一 chunk 内所有 action horizon 共用这个 time。
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
                 observation, x_t, jnp.broadcast_to(time, batch_size)
             )
@@ -268,6 +278,8 @@ class Pi0(_model.BaseModel):
             assert prefix_out is None
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
+            # Flow matching 更新：v_t 是模型预测的速度场，沿 dt 从 noise 逐步走向 action。
+            # 这里仍然更新完整 chunk；外层 Policy.infer 要等循环结束后才返回。
             return x_t + dt * v_t, time + dt
 
         def cond(carry):
@@ -276,4 +288,5 @@ class Pi0(_model.BaseModel):
             return time >= -dt / 2
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
+        # x_0 是归一化空间中的连续 action chunk，不是 token，也不是单个 action。
         return x_0

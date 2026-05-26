@@ -58,6 +58,8 @@ class WebsocketPolicyServer:
                 obs = msgpack_numpy.unpackb(await websocket.recv())
 
                 infer_time = time.monotonic()
+                # 2.1 普通完整 chunk 推理：server 收到一次 obs，只调用一次 policy.infer，
+                # 并等待完整 action dict 生成后再发回客户端。
                 action = self._policy.infer(obs)
                 infer_time = time.monotonic() - infer_time
 
@@ -151,10 +153,13 @@ class StreamingWebsocketPolicyServer:
                 def on_actions_ready(ready_actions):
                     # FASTER: policy callback 产生 partial message，同时后台推理继续 denoise 剩余 horizon；
                     # 用 call_soon_threadsafe 把推理线程的数据交回 asyncio loop。
+                    # 对应 2.2：这里发送的不是 final chunk，而是本 step 刚 newly_ready 的 actions。
                     loop.call_soon_threadsafe(queue.put_nowait, {"type": "partial", "actions": ready_actions})
 
                 def run_inference():
                     try:
+                        # 2.2 Pi0Faster streaming 推理：后台线程跑完整 infer_streaming，
+                        # 中途通过 on_actions_ready 多次把 partial actions 放入 queue。
                         result = self._policy.infer_streaming(
                             obs,
                             on_actions_ready=on_actions_ready,

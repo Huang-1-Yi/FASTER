@@ -294,6 +294,13 @@ class Pi0Faster(_model.BaseModel):
         alpha: float = 1.0,
         u0: float = 0.9,
     ) -> _model.Actions:
+        """Pi0Faster 的非 streaming 完整 chunk 推理。
+
+        对应 guidence_v5.md 的 2.1 和 6.2：这条路径仍然通过
+        ``Policy.infer -> model.sample_actions`` 一次性返回完整连续 action chunk。
+        与 PI0 的差别在于这里可以接收 delay/action_prefix，并可选择 const 或
+        HAS 时间调度；但只要走这个函数，调用方仍要等整块 chunk 完成后才拿结果。
+        """
         observation = _model.preprocess_observation(None, observation, train=False)
         # FASTER: 这里采用 diffusion 常见约定，t=1 是 noise，t=0 是目标 action；这与 pi0 论文记法相反。
         # Data contract: delay/action_prefix 缺省时表示没有已知 prefix，action_prefix 仍补成固定 (b, ah, ad)。
@@ -319,6 +326,8 @@ class Pi0Faster(_model.BaseModel):
 
         def step(carry, _):
             x_t, time = carry
+            # const schedule 分支：行为最像普通 PI0，整块 chunk 按统一 time 推进；
+            # 不同点是 prefix_action_mask 会把已知前缀 action 固定为 action_prefix。
             x_t = jnp.where(prefix_action_mask[..., None], action_prefix, x_t)
             time_ = jnp.broadcast_to(time, batch_size)  # 形状: (b,)
             time_ = jnp.where(prefix_action_mask, 0.0, time_[:, None])  # 形状: (b, ah)
@@ -352,6 +361,8 @@ class Pi0Faster(_model.BaseModel):
 
         def step_adaptive(carry, step_params):
             x_t, _ = carry
+            # HAS 分支：每个 horizon 位置都有自己的 t_curr/dt_curr。
+            # 近端 action 可以更快接近 t=0，但非 streaming 下仍然等 scan 全部结束后再返回。
             x_t = jnp.where(prefix_action_mask[..., None], action_prefix, x_t)
             t_curr, dt_curr = step_params  # 形状: (b, ah)
 
@@ -413,7 +424,13 @@ class Pi0Faster(_model.BaseModel):
         alpha: float = 1.0,
         u0: float = 0.9,
     ):
-        """Precomputes kv_cache and time schedules before streaming."""
+        """Pi0Faster streaming 初始化。
+
+        对应 guidence_v5.md 的 2.2：这一步只做可复用准备工作，
+        包括 observation prefix 的 KV cache、HAS 时间表、每个 step 的 dt、
+        以及判断哪些 horizon 位置 ready 的 mask。真正的 denoising 和 partial
+        输出发生在 ``sample_actions_streaming_step`` 与上层 Python loop 中。
+        """
         observation = _model.preprocess_observation(None, observation, train=False)
         batch_size = observation.state.shape[0]
 
@@ -473,10 +490,17 @@ class Pi0Faster(_model.BaseModel):
         action_prefix: jax.Array,
         observation: _model.Observation,
     ):
-        """Single streaming step, designed to be called asynchronously in a host loop."""
+        """Pi0Faster streaming 单步 denoising。
+
+        输入是 init 预先算好的 KV cache / HAS 当前步参数，以及上一轮动作草稿 ``x_t``。
+        输出除了更新后的 ``x_next``，还会给出 ``newly_ready``，表示这一 step 第一次
+        达到 ready 条件、上层可以马上发送的 action horizon 位置。
+        """
         x_t = jnp.where(prefix_action_mask[..., None], action_prefix, x_t)
 
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, t_curr)
+        # streaming step 与非 streaming HAS 分支使用相同的 suffix attention 结构；
+        # 差别在于它只执行一个 step，并把 newly_ready 暴露给上层 Policy.infer_streaming。
         suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
         prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
         full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
