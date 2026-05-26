@@ -189,28 +189,38 @@ class Pi0(_model.BaseModel):
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
+        # 8. Pi0.compute_loss 的训练目标：学习 action flow 的速度场；推理时用负 dt 从 noise 走向真实 action。
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
+        # 8.1 输入真实 actions；形状通常是 [batch, action_horizon, action_dim]。
         batch_shape = actions.shape[:-2]
+        # 8.2 随机采样 noise：生成和 actions 同形状的高斯噪声。
         noise = jax.random.normal(noise_rng, actions.shape)
+        # 8.3 随机采样 time：每个样本取一个 flow matching 时间点。
         time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
         time_expanded = time[..., None, None]
+        # 8.4 构造 noisy action：time 越接近 1 越像 noise，越接近 0 越像真实 actions。
         x_t = time_expanded * noise + (1 - time_expanded) * actions
+        # 8.5 构造监督目标速度：u_t = noise - actions；推理时乘负 dt，相当于朝真实 actions 方向更新。
         u_t = noise - actions
 
-        # one big forward pass of prefix + suffix at once
+        # 8.6 编码 observation prefix：图像、文本、state 形成条件 token。
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        # 8.7 编码 action suffix：noisy action x_t 与 time 形成动作相关 token。
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
         input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
         attn_mask = make_attn_mask(input_mask, ar_mask)
         positions = jnp.cumsum(input_mask, axis=1) - 1
+        # 8.8 模型 forward：一次前向同时处理 prefix 和 suffix。
         (prefix_out, suffix_out), _ = self.PaliGemma.llm(
             [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
         )
+        # 8.9 投影得到预测速度 v_t，只取最后 action_horizon 个 action token。
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
+        # 8.10 计算 MSE loss：让预测速度 v_t 接近监督目标 u_t。
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
     @override

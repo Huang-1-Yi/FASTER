@@ -131,6 +131,8 @@ def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
     """Create a dataset for training."""
+    # 3.8 创建 LeRobotDataset：pi05_libero 会读取 physical-intelligence/libero，
+    # 并按 action_horizon=10 为每个样本取一段 action sequence。
     repo_id = data_config.repo_id
     if repo_id is None:
         raise ValueError("Repo ID is not set. Cannot create dataset.")
@@ -146,6 +148,7 @@ def create_torch_dataset(
     )
 
     if data_config.prompt_from_task:
+        # 3.9 的第一步：从 LeRobot task id 生成 prompt，后续 transform 会继续处理字段和数值格式。
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
 
     return dataset
@@ -171,6 +174,8 @@ def create_rlds_dataset(
 
 def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip_norm_stats: bool = False) -> Dataset:
     """Transform the dataset by applying the data transforms."""
+    # 3.9 串联训练样本 transforms：repack -> data_transforms -> Normalize -> model_transforms。
+    # 对 pi05_libero，这条链路会把 LeRobot 样本转成 Observation.from_dict 能读取的格式。
     norm_stats = {}
     if data_config.repo_id != "fake" and not skip_norm_stats:
         if data_config.norm_stats is None:
@@ -239,37 +244,13 @@ def create_data_loader(
         skip_norm_stats: Whether to skip data normalization.
         framework: The framework to use ("jax" or "pytorch").
     """
-    # 这是训练脚本的数据入口。train.py 只传入 TrainConfig，这里负责把 config.data
-    # 真正展开成 DataConfig，也就是确定：读哪个数据集、用哪些 transform、用哪些 norm stats。
-    # 对命令 `pi05_libero` 来说，这里会调用 LeRobotLiberoDataConfig.create(...)。
+    # 3.1 创建 Data Loader 的入口：train.py 只传入 TrainConfig，这里先把 config.data 展开成 DataConfig。
+    # 对 pi05_libero 来说，会调用 LeRobotLiberoDataConfig.create(...)。
     data_config = config.data.create(config.assets_dirs, config.model)
-    # dataset 原字段
-    # -> repack:
-    #     image -> observation/image
-    #     wrist_image -> observation/wrist_image
-    #     state -> observation/state
-    #     actions -> actions
-    #     prompt -> prompt
-
-    # -> LiberoInputs:
-    #     observation/image -> image["base_0_rgb"]
-    #     observation/wrist_image -> image["left_wrist_0_rgb"]
-    #     zero image -> image["right_wrist_0_rgb"]
-    #     state -> state
-    #     actions -> actions
-
-    # -> Normalize:
-    #     state/actions 按 assets 中的 norm stats 归一化
-
-    # -> ModelTransformFactory 的 PI05 分支:
-    #     InjectDefaultPrompt
-    #     ResizeImages(224, 224)
-    #     TokenizePrompt(PaligemmaTokenizer, discrete_state_input=False)
-    #     PadStatesAndActions(action_dim=32, action_horizon=10)
     logging.info(f"data_config: {data_config}")
 
-    # rlds_data_dir 不为空时，表示这个配置走 RLDS 数据格式，目前主要用于 DROID。
-    # RLDS loader 自己已经按 batch 迭代，所以后面会走 create_rlds_data_loader。
+    # 3.6 判断 data loader 分支。
+    # rlds_data_dir 不为空时走 3.12 的 RLDS 分支；pi05_libero 为 None，因此不会进入这里。
     if data_config.rlds_data_dir is not None:
         return create_rlds_data_loader(
             data_config,
@@ -281,10 +262,9 @@ def create_data_loader(
             skip_norm_stats=skip_norm_stats,
             framework=framework,
         )
-    
-    # 大多数 LeRobot 数据集，包括 pi05_libero 的 physical-intelligence/libero，都走这里。
-    # 名字叫 create_torch_data_loader，是因为底层用 torch.utils.data.DataLoader 负责多进程取数；
-    # 但 framework="jax" 时，取出的 numpy batch 会再转换成 JAX array，并按 sharding 放到设备上。
+
+    # 3.7 pi05_libero 走 LeRobot / Torch 分支。
+    # “Torch”只表示底层用 torch.utils.data.DataLoader 取数；framework="jax" 时仍会转成 JAX array 训练。
     return create_torch_data_loader(
         data_config,
         model_config=config.model,
@@ -331,12 +311,12 @@ def create_torch_data_loader(
             execute in the main process.
         seed: The seed to use for shuffling the data.
     """
+    # 3.7/3.8 先创建 LeRobotDataset，再按 3.9 的 transform 链路转换每个样本。
     dataset = create_torch_dataset(data_config, action_horizon, model_config)
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
-    # Use TorchDataLoader for both frameworks
-    # For PyTorch DDP, create DistributedSampler and divide batch size by world size
-    # For JAX, divide by process count
+    # 3.10 TorchDataLoader 负责 shuffle、batch 和多进程读取。
+    # JAX 训练时 local_batch_size 按 JAX process 数均分；单机单进程时就是全局 batch_size。
     sampler = None
     if framework == "pytorch":
         if torch.distributed.is_initialized():
@@ -396,11 +376,14 @@ def create_rlds_data_loader(
             number of batches in the dataset, the data loader will loop over the dataset.
             If not provided, will iterate over the dataset indefinitely.
     """
+    # 3.12 RLDS 分支：只有 data_config.rlds_data_dir 不为空时才会由 create_data_loader 调到这里。
+    # pi05_libero 不走这条路；它主要服务 DROID 这类已经按 batch 组织好的 RLDS 数据。
     if framework == "pytorch":
         raise NotImplementedError("PyTorch RLDS data loader is not supported yet")
     dataset = create_rlds_dataset(data_config, action_horizon, batch_size, shuffle=shuffle)
     dataset = transform_iterable_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats, is_batched=True)
 
+    # 3.12 RLDSDataLoader 只做薄包装：把 iterable batch 放到 JAX sharding 上，并支持循环读取。
     data_loader = RLDSDataLoader(
         dataset,
         sharding=sharding,
@@ -531,11 +514,12 @@ class RLDSDataLoader:
         self._dataset = dataset
         self._num_batches = num_batches
 
+        # 3.12 当前 RLDS wrapper 不支持多 JAX process 同时读取。
         if jax.process_count() > 1:
             raise NotImplementedError("Data loading with multiple processes is not supported.")
 
         if sharding is None:
-            # Use data parallel sharding by default.
+            # 3.12 未显式传 sharding 时，默认按 batch 维做数据并行；单卡时就是整个 batch 放到一张卡。
             sharding = jax.sharding.NamedSharding(
                 jax.sharding.Mesh(jax.devices(), ("B",)),
                 jax.sharding.PartitionSpec("B"),
@@ -547,6 +531,7 @@ class RLDSDataLoader:
     def __iter__(self):
         num_items = 0
         while True:
+            # 3.12 RLDS dataset 是 iterable；一轮读完后重新创建 iterator，让训练可以持续取 batch。
             data_iter = iter(self._dataset)
             while True:
                 if self._num_batches is not None and num_items >= self._num_batches:
@@ -556,6 +541,7 @@ class RLDSDataLoader:
                 except StopIteration:
                     break  # We've exhausted the dataset. Create a new iterator and start over.
                 num_items += 1
+                # 3.12 把本地 batch 转成带 sharding 的 JAX array，交给 JIT 后的 train_step。
                 yield jax.tree.map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)
 
 
@@ -569,4 +555,5 @@ class DataLoaderImpl(DataLoader):
 
     def __iter__(self):
         for batch in self._data_loader:
+            # 3.11 DataLoaderImpl 输出训练需要的结构：Observation 和监督用 actions。
             yield _model.Observation.from_dict(batch), batch["actions"]

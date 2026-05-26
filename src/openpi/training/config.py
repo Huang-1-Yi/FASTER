@@ -332,14 +332,15 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        # 调用入口：data_loader.create_data_loader(...) 会执行 config.data.create(config.assets_dirs, config.model)。
+        # 3.2 LeRobotLiberoDataConfig.create：data_loader.create_data_loader 会调用到这里。
         # 对 `pi05_libero`，config.data 就是 LeRobotLiberoDataConfig，所以会进入当前 create。
-        # 这个函数不直接读取数据样本；它只组装“之后每个样本要按什么顺序转换”的 DataConfig。
+        # 这个函数不直接读取样本；它只组装“之后每个样本要按什么顺序转换”的 DataConfig。
 
         # assets_dirs 是当前 config 的 assets 目录，例如 assets/pi05_libero。
         # create_base_config 会从这里加载 normalization stats，后面的 Normalize transform 会用这些统计量归一化 state/actions。
         # model_config 是模型配置；对 `pi05_libero`，它是 Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False)。
 
+        # 3.3 配置 repack_transforms：把 LeRobot dataset 原始 key 改成 LIBERO adapter 期望的 key。
         # Data contract: repack 只作用于离线 dataset，不作用于在线推理；它把 LeRobot 转换脚本产出的键名
         # 对齐到 LIBERO 推理 adapter 的输入契约。自定义 dataset 时，先看 policy server 实际传入哪些 key，
         # 再把这里的映射改成“dataset key -> 推理契约 key”。
@@ -358,6 +359,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             ]
         )
 
+        # 3.4 配置 data_transforms：把 LIBERO 格式转成 openpi 统一输入格式。
         # Data contract: data_transforms 同时用于训练和推理；inputs 把 LIBERO 契约转成 openpi 统一输入，
         # outputs 只在推理后把模型输出转回环境 action。若换自定义 adapter，就替换这里的 inputs/outputs。
         # LiberoInputs 会把 observation/image、observation/wrist_image、observation/state 转成：
@@ -368,6 +370,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             outputs=[libero_policy.LiberoOutputs()],
         )
 
+        # 3.4 的可选扩展：某些数据集若存的是 absolute action，可在这里补 delta action 转换。
         # Data contract: Pi0 训练通常使用相对当前 state 的 delta actions；若 dataset 存的是 absolute 关节目标，
         # 需要用 DeltaActions 转换 joint 维度并让 gripper 保持 absolute。LIBERO 原始 actions 已是 delta，
         # 只有兼容旧 Pi0 checkpoint 时才额外开启这里的 DeltaActions。
@@ -378,12 +381,14 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
             )
 
+        # 3.5 配置 model_transforms：处理 prompt tokenization、图像尺寸、state/action padding 等模型侧格式。
         # Data contract: model_transforms 处理 prompt tokenization、图像尺寸、state/action padding 等模型侧格式；
         # 这层与具体 dataset key 无关，自定义数据集通常只改 repack/data_transforms。
         # 对 pi05_libero，这里会进入 ModelTransformFactory 的 PI05 分支：
         # InjectDefaultPrompt -> ResizeImages(224, 224) -> TokenizePrompt -> PadStatesAndActions(32, 10)。
         model_transforms = ModelTransformFactory()(model_config)
 
+        # 3.2 返回 DataConfig：把基础 DataConfig 与 LIBERO 专属 transforms 合并。
         # Data contract: 返回的三层 transform 让离线样本和在线 obs 走同一口径，避免训练/部署格式漂移。
         # dataclasses.replace 表示：先拿 create_base_config 生成的基础 DataConfig，再把 LIBERO 专属 transforms 填进去。
         # 最终 data_loader.transform_dataset 会按 repack -> data_transforms -> Normalize -> model_transforms 的顺序处理样本。
