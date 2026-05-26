@@ -34,8 +34,8 @@ ALL_PROXY=socks://127.0.0.1:7897/
 all_proxy=socks://127.0.0.1:7897/
 ”
 # --active 
-uv run scripts/compute_norm_stats.py --config-name pi05_libero                    # 给 pi05 配置也算一次
-uv run scripts/compute_norm_stats.py --config-name pi05_faster_libero    # 再给 FASTER 配置也算一次
+uv run scripts/compute_norm_stats.py --config-name pi05_libero          # 给 pi05 配置也算一次
+uv run scripts/compute_norm_stats.py --config-name pi05_faster_libero   # 再给 FASTER 配置也算一次
 
 
 
