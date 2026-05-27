@@ -238,3 +238,32 @@ python inference/infer_async.py --mode=rtc --delay=3 --exec_horizon=4 --streamin
 - [openpi](https://github.com/Physical-Intelligence/openpi)
 - [real-time-chunking-kinetix](https://github.com/Physical-Intelligence/real-time-chunking-kinetix)
 - [AgiBot-World](https://github.com/OpenDriveLab/AgiBot-World)
+
+
+
+
+第一个终端
+CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/serve_policy.py policy:checkpoint   --policy.config=pi05_libero_low_mem_finetune   --policy.dir=checkpoints/pi05_libero_low_mem_finetune/test_openpi_lora/9
+
+第二个终端-测试
+uv run examples/simple_client/main.py   --env LIBERO   --num-steps 5
+第二个终端-仿真评估环境安装与更新
+git submodule update --init --recursive
+
+uv venv --python 3.8 examples/libero/.venv
+source examples/libero/.venv/bin/activate
+
+uv pip sync   examples/libero/requirements.txt   third_party/libero/requirements.txt   --extra-index-url "https://download.pytorch.org/whl/cu113 https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"   --index-strategy=unsafe-best-match
+
+uv pip install -e packages/openpi-client
+uv pip install -e third_party/libero
+
+第二个终端-仿真评估
+export LIBERO_CONFIG_PATH=$PWD/third_party/libero
+export PYTHONPATH=$PYTHONPATH:$PWD/third_party/libero
+export MUJOCO_GL=egl
+
+python examples/libero/main.py   --args.task-suite-name libero_spatial   --args.num-trials-per-task 1   --args.save-name test_openpi_lora_step9_smoke   --args.host 127.0.0.1   --args.port 8000 --args.save-videos
+
+正式版本client
+python examples/libero/main.py   --args.task-suite-name libero_spatial   --args.num-trials-per-task 50   --args.save-name test_openpi_lora_step9_spatial   --args.host 127.0.0.1   --args.port 8000
