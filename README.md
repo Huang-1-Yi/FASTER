@@ -239,15 +239,41 @@ python inference/infer_async.py --mode=rtc --delay=3 --exec_horizon=4 --streamin
 - [real-time-chunking-kinetix](https://github.com/Physical-Intelligence/real-time-chunking-kinetix)
 - [AgiBot-World](https://github.com/OpenDriveLab/AgiBot-World)
 
+## PI0.5 LIBERO LoRA 训练后测试与仿真评估
 
+以下命令用于检查 `pi05_libero_low_mem_finetune` 的 LoRA checkpoint 是否能被加载、是否能完成一次 WebSocket 推理，以及如何进一步在 LIBERO 仿真环境中评估成功率。这里的示例 checkpoint 来自 10 step smoke training：
 
+```text
+checkpoints/pi05_libero_low_mem_finetune/test_openpi_lora/9
+```
 
-第一个终端
+10 step checkpoint 主要用于验证链路是否跑通，成功率通常没有参考意义；正式实验建议继续训练到更高步数后，把下面命令里的 `9` 换成对应的 checkpoint step。
+
+### 1. 启动 policy server
+
+第一个终端保持运行：
+
+```bash
 CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/serve_policy.py policy:checkpoint   --policy.config=pi05_libero_low_mem_finetune   --policy.dir=checkpoints/pi05_libero_low_mem_finetune/test_openpi_lora/9
+```
 
-第二个终端-测试
+这是普通 PI0.5 LoRA 推理，不是 Pi0Faster streaming，因此不要加 `--streaming`。
+
+### 2. 最小连通性测试
+
+第二个终端先用随机 LIBERO observation 测试 server 是否能返回 action：
+
+```bash
 uv run examples/simple_client/main.py   --env LIBERO   --num-steps 5
-第二个终端-仿真评估环境安装与更新
+```
+
+如果输出 `Timing Statistics`，说明 checkpoint 加载、WebSocket 通信和普通 chunk 推理都已经正常。
+
+### 3. 安装或更新 LIBERO 仿真环境
+
+如果已经安装过 `examples/libero/.venv`，可以跳过本节，直接进入下一节。
+
+```bash
 git submodule update --init --recursive
 
 uv venv --python 3.8 examples/libero/.venv
@@ -257,13 +283,52 @@ uv pip sync   examples/libero/requirements.txt   third_party/libero/requirements
 
 uv pip install -e packages/openpi-client
 uv pip install -e third_party/libero
+```
 
-第二个终端-仿真评估
+后续每次重新打开终端，只需要激活这个环境：
+
+```bash
+source examples/libero/.venv/bin/activate
+```
+
+### 4. LIBERO smoke test
+
+先每个任务只跑 1 次，并保存视频，确认仿真、图像预处理、policy server 和动作执行链路都能跑通：
+
+```bash
 export LIBERO_CONFIG_PATH=$PWD/third_party/libero
 export PYTHONPATH=$PYTHONPATH:$PWD/third_party/libero
 export MUJOCO_GL=egl
 
-python examples/libero/main.py   --args.task-suite-name libero_spatial   --args.num-trials-per-task 1   --args.save-name test_openpi_lora_step9_smoke   --args.host 127.0.0.1   --args.port 8000 --args.save-videos
+python examples/libero/main.py   --args.task-suite-name libero_spatial   --args.num-trials-per-task 1   --args.save-name test_openpi_lora_step9_smoke   --args.host 127.0.0.1   --args.port 8000   --args.save-videos
+```
 
-正式版本client
+结果会写入：
+
+```text
+data/libero_eval/results/test_openpi_lora_step9_smoke_results.txt
+```
+
+视频会写入：
+
+```text
+data/libero_eval/videos/test_openpi_lora_step9_smoke/libero_spatial/
+```
+
+### 5. 正式 LIBERO 评估
+
+确认 smoke test 正常后，再跑正式评估。下面以 `libero_spatial` 为例，每个任务跑 50 次：
+
+```bash
 python examples/libero/main.py   --args.task-suite-name libero_spatial   --args.num-trials-per-task 50   --args.save-name test_openpi_lora_step9_spatial   --args.host 127.0.0.1   --args.port 8000
+```
+
+常用任务套件包括：
+
+```text
+libero_spatial
+libero_object
+libero_goal
+libero_10
+libero_90
+```
