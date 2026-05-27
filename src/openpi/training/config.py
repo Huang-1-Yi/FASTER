@@ -894,6 +894,44 @@ _CONFIGS = [
         num_workers=8,
     ),
     TrainConfig(
+        name="pi05_libero_low_mem_finetune",
+        # 4090 / 24GB 友好的 LIBERO LoRA 微调配置：保留 pi0.5 数据与模型格式，但只训练 LoRA 参数。
+        # 相比 pi05_libero full fine-tuning，这里冻结大部分 base 参数、关闭 EMA，并降低 batch_size。
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        num_workers=8,
+        # freeze_filter 必须由同一份 LoRA model config 生成，确保只训练 LoRA 参数。
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        # LoRA 微调关闭 EMA，避免额外维护一整份参数滑动平均导致显存/内存增加。
+        ema_decay=None,
+    ),
+    TrainConfig(
         name="pi05_faster_libero",
         # FASTER: LIBERO 的 FASTER 冒烟测试配置。
         # NOTE: max_delay=0 会关闭历史 action_prefix 采样；若训练遇到 randint 边界问题，优先检查这里。

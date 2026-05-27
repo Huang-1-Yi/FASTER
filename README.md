@@ -126,6 +126,14 @@ uv run scripts/compute_norm_stats.py --config-name pi05_faster_agilex
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_faster_agilex --exp-name=my_experiment
 ```
 
+如果你要在 LIBERO 上做 4090 友好的 LoRA 微调，请改用新增的低显存配置：
+
+```bash
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_libero_low_mem_finetune --exp-name=test_openpi --num-train-steps=10 --resume
+```
+
+这个配置会保留 pi05 的数据与输入格式，但只训练 LoRA 参数，不再走 full finetune 的大显存路径。
+
 
 
 ### Policy Deployment
