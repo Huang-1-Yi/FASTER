@@ -906,6 +906,9 @@ _CONFIGS = [
         ),
         data=LeRobotLiberoDataConfig(
             repo_id="physical-intelligence/libero",
+            # LoRA 配置和 pi05_libero 使用同一份 LIBERO 数据与同一套 state/action 归一化统计量。
+            # 复用 assets/pi05_libero 可以避免为新 config 重新运行 compute_norm_stats。
+            assets=AssetsConfig(assets_dir="./assets/pi05_libero", asset_id="physical-intelligence/libero"),
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
         ),
