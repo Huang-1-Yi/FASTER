@@ -17,25 +17,23 @@ logger = logging.getLogger("openpi")
 
 
 def make_attn_mask(input_mask, mask_ar):
-    """Adapted from big_vision.
+    """改自 big_vision。
 
-    Tokens can attend to valid inputs tokens which have a cumulative mask_ar
-    smaller or equal to theirs. This way `mask_ar` bool[?B, N] can be used to
-    setup several types of attention, for example:
+    token 可以 attend 到有效输入 token；这些 token 的累计 mask_ar 必须小于或等于当前 token。
+    因此 `mask_ar` bool[?B, N] 可以表达多种 attention 结构，例如：
 
-      [[1 1 1 1 1 1]]: pure causal attention.
+      [[1 1 1 1 1 1]]: 纯 causal attention。
 
-      [[0 0 0 1 1 1]]: prefix-lm attention. The first 3 tokens can attend between
-          themselves and the last 3 tokens have a causal attention. The first
-          entry could also be a 1 without changing behaviour.
+      [[0 0 0 1 1 1]]: prefix-lm attention。前 3 个 token 互相可见，
+          后 3 个 token 使用 causal attention。第一个值也可以是 1，行为不变。
 
-      [[1 0 1 0 1 0 0 1 0 0]]: causal attention between 4 blocks. Tokens of a
-          block can attend all previous blocks and all tokens on the same block.
+      [[1 0 1 0 1 0 0 1 0 0]]: 4 个 block 之间是 causal attention；
+          同一个 block 内 token 互相可见，并且可以 attend 到所有之前的 block。
 
     Args:
-      input_mask: bool[B, N] true if its part of the input, false if padding.
-      mask_ar: bool[?B, N] mask that's true where previous tokens cannot depend on
-        it and false where it shares the same attention mask as the previous token.
+      input_mask: bool[B, N]，true 表示有效输入，false 表示 padding。
+      mask_ar: bool[?B, N]，true 表示之前的 token 不能依赖该位置；
+        false 表示该位置和前一个 token 共享相同 attention mask。
     """
     mask_ar = jnp.broadcast_to(mask_ar, input_mask.shape)
     cumsum = jnp.cumsum(mask_ar, axis=1)
@@ -48,7 +46,7 @@ def make_attn_mask(input_mask, mask_ar):
 def posemb_sincos(
     pos: at.Real[at.Array, " b"], embedding_dim: int, min_period: float, max_period: float
 ) -> at.Float[at.Array, "b {embedding_dim}"]:
-    """Computes sine-cosine positional embedding vectors for scalar positions."""
+    """为标量位置计算 sine-cosine positional embedding 向量。"""
     if embedding_dim % 2 != 0:
         raise ValueError(f"embedding_dim ({embedding_dim}) must be divisible by 2")
 
@@ -84,7 +82,7 @@ class Pi0Diffusion(_model.BaseModel):
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
-        # TODO: rewrite gemma in NNX. For now, use bridge.
+        # TODO: 后续可把 gemma 重写成 NNX；当前先通过 bridge 复用已有实现。
         llm = nnx_bridge.ToNNX(
             _gemma.Module(
                 configs=[paligemma_config, action_expert_config],
@@ -114,11 +112,11 @@ class Pi0Diffusion(_model.BaseModel):
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
 
-        # This attribute gets automatically set by model.train() and model.eval().
+        # 该属性会由 model.train() 和 model.eval() 自动切换。
         self.deterministic = True
 
     def _alpha_bar(self, time: jax.Array) -> jax.Array:
-        """Continuous alpha_bar(t), where t=0 is clean action and t=1 is near pure noise."""
+        """连续 alpha_bar(t)；t=0 是干净 action，t=1 接近纯噪声。"""
         time = jnp.clip(time, 0.0, 1.0)
         if self.diffusion_schedule == "cosine":
             s = 0.008
@@ -179,7 +177,7 @@ class Pi0Diffusion(_model.BaseModel):
         input_mask = []
         ar_mask = []
         tokens = []
-        # embed images
+        # 编码图像。
         for name in obs.images:
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
 
@@ -191,15 +189,15 @@ class Pi0Diffusion(_model.BaseModel):
                     s=image_tokens.shape[1],
                 )
             )
-            # image tokens attend to each other
+            # 图像 token 之间互相可见。
             ar_mask += [False] * image_tokens.shape[1]
 
-        # add language (aka tokenized inputs)
+        # 加入语言 token。
         if obs.tokenized_prompt is not None:
             tokenized_inputs = self.PaliGemma.llm(obs.tokenized_prompt, method="embed")
             tokens.append(tokenized_inputs)
             input_mask.append(obs.tokenized_prompt_mask)
-            # full attention between image and language inputs
+            # 图像和语言输入之间使用 full attention。
             ar_mask += [False] * tokenized_inputs.shape[1]
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
@@ -219,18 +217,18 @@ class Pi0Diffusion(_model.BaseModel):
         ar_mask = []
         tokens = []
         if not self.pi05:
-            # add a single state token
+            # 非 pi05 路径加入单个连续 state token。
             state_token = self.state_proj(obs.state)[:, None, :]
             tokens.append(state_token)
             input_mask.append(jnp.ones((obs.state.shape[0], 1), dtype=jnp.bool_))
-            # image/language inputs do not attend to state or actions
+            # 图像/语言输入不 attend 到 state 或 action。
             ar_mask += [True]
 
         action_tokens = self.action_in_proj(noisy_actions)
-        # embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
+        # 用 sine-cosine positional encoding 编码 timestep；输入范围是 [0, 1]。
         time_emb = posemb_sincos(timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0)
         if self.pi05:
-            # time MLP (for adaRMS)
+            # time MLP 用于生成 adaRMS 条件。
             time_emb = self.time_mlp_in(time_emb)
             time_emb = nnx.swish(time_emb)
             time_emb = self.time_mlp_out(time_emb)
@@ -238,7 +236,7 @@ class Pi0Diffusion(_model.BaseModel):
             action_expert_tokens = action_tokens
             adarms_cond = time_emb[:, None, :]
         else:
-            # mix timestep + action information using an MLP (no adaRMS)
+            # 非 pi05 路径用 MLP 融合 timestep 和 action 信息，不使用 adaRMS。
             time_tokens = einops.repeat(time_emb, "b emb -> b s emb", s=self.action_horizon)
             action_time_tokens = jnp.concatenate([action_tokens, time_tokens], axis=-1)
             action_time_tokens = self.action_time_mlp_in(action_time_tokens)
@@ -248,7 +246,7 @@ class Pi0Diffusion(_model.BaseModel):
             adarms_cond = None
         tokens.append(action_expert_tokens)
         input_mask.append(jnp.ones(action_expert_tokens.shape[:2], dtype=jnp.bool_))
-        # image/language/state inputs do not attend to action tokens
+        # 图像/语言/state 输入不 attend 到 action token。
         ar_mask += [True] + ([False] * (self.action_horizon - 1))
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
@@ -259,7 +257,7 @@ class Pi0Diffusion(_model.BaseModel):
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
-        # Diffusion training mirrors Diffusion Policy: sample a timestep, add noise, and predict the configured target.
+        # diffusion 训练对应 Diffusion Policy：采样 timestep、加噪，并预测配置指定的 target。
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
@@ -295,8 +293,8 @@ class Pi0Diffusion(_model.BaseModel):
     ) -> _model.Actions:
         """PI0 diffusion 完整 chunk 推理。
 
-        从一整块 Gaussian action noise 出发，所有 horizon 位置共享一个
-        scalar diffusion time，通过 deterministic DDIM 逐步更新到 t=0。
+        从一整块 Gaussian action noise 出发，所有 horizon 位置共享一个标量 diffusion time，
+        通过 deterministic DDIM 逐步更新到 t=0。
         """
         observation = _model.preprocess_observation(None, observation, train=False)
         dt = -1.0 / num_steps
@@ -314,21 +312,19 @@ class Pi0Diffusion(_model.BaseModel):
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
                 observation, x_t, jnp.broadcast_to(time, batch_size)
             )
-            # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
-            # other
+            # `suffix_attn_mask` 形状是 (b, suffix_len, suffix_len)，表示 suffix token 之间如何互相 attend。
             suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
-            # `prefix_attn_mask` is shape (b, suffix_len, prefix_len) indicating how the suffix tokens can attend to the
-            # prefix tokens
+            # `prefix_attn_mask` 形状是 (b, suffix_len, prefix_len)，表示 suffix token 如何 attend 到 prefix token。
             prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
-            # `combined_mask` is shape (b, suffix_len, prefix_len + suffix_len) indicating how the suffix tokens (which
-            # generate the queries) can attend to the full prefix + suffix sequence (which generates the keys and values)
+            # `full_attn_mask` 形状是 (b, suffix_len, prefix_len + suffix_len)，表示作为 query 的 suffix token
+            # 如何 attend 到生成 key/value 的完整 prefix + suffix 序列。
             full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
             assert full_attn_mask.shape == (
                 batch_size,
                 suffix_tokens.shape[1],
                 prefix_tokens.shape[1] + suffix_tokens.shape[1],
             )
-            # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
+            # `positions` 形状是 (b, suffix_len)，表示 suffix token 的位置。
             positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
 
             (prefix_out, suffix_out), _ = self.PaliGemma.llm(
@@ -346,7 +342,7 @@ class Pi0Diffusion(_model.BaseModel):
 
         def cond(carry):
             x_t, time = carry
-            # robust to floating-point error
+            # 对浮点误差稍微宽松一些。
             return time >= -dt / 2
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))

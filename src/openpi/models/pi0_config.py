@@ -111,9 +111,11 @@ class Pi0Config(_model.BaseModelConfig):
 
 @dataclasses.dataclass(frozen=True)
 class Pi0DiffusionConfig(Pi0Config):
-    # Diffusion Policy style objective while reusing the Pi0/Pi0.5 Gemma action expert architecture.
+    # 继承 Pi0Config 的通用字段：dtype、paligemma_variant、action_expert_variant、action_dim、
+    # action_horizon、max_token_len、pi05、discrete_state_input 和 LoRA freeze 逻辑。
+    # 这里仅新增 diffusion 专用字段，避免和父类默认值重复定义后产生不一致。
     num_diffusion_train_timesteps: int = 100
-    diffusion_prediction_type: Literal["epsilon", "sample", "v"] = "epsilon"
+    diffusion_prediction_type: Literal["epsilon", "sample", "v"] = "v"
     diffusion_schedule: Literal["cosine", "linear"] = "cosine"
     diffusion_min_alpha_bar: float = 1e-4
     diffusion_clip_sample: bool = False
@@ -123,6 +125,21 @@ class Pi0DiffusionConfig(Pi0Config):
         from openpi.models.pi0_diffusion import Pi0Diffusion
 
         return Pi0Diffusion(self, rngs=nnx.Rngs(rng))
+
+    def get_action_lora_freeze_filter(self) -> nnx.filterlib.Filter:
+        """冻结 VLM 主干，只训练 action 侧 LoRA 和 action 输入/时间/输出小层。"""
+        trainable_filters = [
+            # Gemma action expert 是第二个 llm 分支；这里只放开它的 LoRA 参数，不全量训练 300M expert。
+            nnx_utils.PathRegex(".*llm.*_1.*lora.*"),
+            # action/noise 进入 action expert 前后的轻量适配层。
+            nnx_utils.PathRegex(".*action_in_proj.*"),
+            nnx_utils.PathRegex(".*time_mlp_in.*"),
+            nnx_utils.PathRegex(".*time_mlp_out.*"),
+            nnx_utils.PathRegex(".*action_time_mlp_in.*"),
+            nnx_utils.PathRegex(".*action_time_mlp_out.*"),
+            nnx_utils.PathRegex(".*action_out_proj.*"),
+        ]
+        return nnx.All(*(nnx.Not(filter_) for filter_ in trainable_filters))
 
 
 @dataclasses.dataclass(frozen=True)

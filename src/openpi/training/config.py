@@ -975,13 +975,16 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_libero_diffusion",
-        # Diffusion objective version of pi05_libero: same PaliGemma + Gemma action expert architecture,
-        # but Pi0Diffusion.compute_loss/sample_actions use q-sample + DDIM instead of flow matching Euler updates.
+        # pi05_libero 的 diffusion objective 版本：结构仍是 PaliGemma + Gemma action expert，
+        # 但 Pi0Diffusion.compute_loss/sample_actions 使用 q-sample + DDIM，而不是 flow matching Euler 更新。
         model=pi0_config.Pi0DiffusionConfig(
             pi05=True,
+            action_dim=32,
             action_horizon=10,
             discrete_state_input=False,
-            diffusion_prediction_type="epsilon",
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+            diffusion_prediction_type="v",
             diffusion_schedule="cosine",
             num_diffusion_train_timesteps=100,
         ),
@@ -1008,11 +1011,12 @@ _CONFIGS = [
         # 24GB 级别显存优先用这个配置做方案三 smoke test；它复用 pi05_libero 的 norm stats。
         model=pi0_config.Pi0DiffusionConfig(
             pi05=True,
+            action_dim=32,
             action_horizon=10,
             discrete_state_input=False,
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
-            diffusion_prediction_type="epsilon",
+            diffusion_prediction_type="v",
             diffusion_schedule="cosine",
             num_diffusion_train_timesteps=100,
         ),
@@ -1035,11 +1039,63 @@ _CONFIGS = [
         num_workers=8,
         freeze_filter=pi0_config.Pi0DiffusionConfig(
             pi05=True,
+            action_dim=32,
             action_horizon=10,
             discrete_state_input=False,
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
+            diffusion_prediction_type="v",
+            diffusion_schedule="cosine",
+            num_diffusion_train_timesteps=100,
         ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_libero_diffusion_action_lora",
+        # 推荐用于比较 diffusion objective vs flow matching：从 pi05_libero 初始化，冻结 VLM，
+        # 只训练 action expert LoRA 和 action 输入/时间/输出小层，降低显存与优化难度。
+        model=pi0_config.Pi0DiffusionConfig(
+            pi05=True,
+            action_dim=32,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+            diffusion_prediction_type="v",
+            diffusion_schedule="cosine",
+            num_diffusion_train_timesteps=100,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_libero/assets",
+                asset_id="physical-intelligence/libero",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_libero/params"),
+        num_train_steps=30_000,
+        num_workers=8,
+        freeze_filter=pi0_config.Pi0DiffusionConfig(
+            pi05=True,
+            action_dim=32,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+            diffusion_prediction_type="v",
+            diffusion_schedule="cosine",
+            num_diffusion_train_timesteps=100,
+        ).get_action_lora_freeze_filter(),
         ema_decay=None,
     ),
     TrainConfig(
