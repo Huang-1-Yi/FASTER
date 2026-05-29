@@ -4,6 +4,7 @@ import pathlib
 from typing import Any
 
 import jax.numpy as jnp
+import numpy as np
 
 import openpi.models.model as _model
 import openpi.policies.policy as _policy
@@ -54,7 +55,11 @@ def create_trained_policy(
         model = train_config.model.load_pytorch(train_config, weight_path)
         model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
     else:
-        model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
+        # 先把参数恢复成 host-side numpy 数组，避免 Orbax 在 restore 阶段直接把整份参数
+        # device_put 到 GPU 上造成显存峰值；随后由 model.load 统一完成参数装载。
+        model = train_config.model.load(
+            _model.restore_params(checkpoint_dir / "params", restore_type=np.ndarray, dtype=jnp.bfloat16)
+        )
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
     if norm_stats is None:
         # We are loading the norm stats from the checkpoint instead of the config assets dir to make sure
