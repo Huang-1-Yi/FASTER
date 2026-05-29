@@ -935,6 +935,46 @@ _CONFIGS = [
         ema_decay=None,
     ),
     TrainConfig(
+        name="pi05_libero_lora_from_libero",
+        # 从已经在 LIBERO 上微调好的 pi05_libero checkpoint 继续做 LoRA 微调。
+        # 与 pi05_libero_low_mem_finetune 的区别只在初始化权重：这里用 pi05_libero，而不是 pi05_base。
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets/checkpoints/pi05_libero/assets",
+                asset_id="physical-intelligence/libero",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_libero/params"),
+        num_train_steps=30_000,
+        num_workers=8,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
         name="pi05_faster_libero",
         # FASTER: LIBERO 的 FASTER 冒烟测试配置。
         # NOTE: max_delay=0 会关闭历史 action_prefix 采样；若训练遇到 randint 边界问题，优先检查这里。
