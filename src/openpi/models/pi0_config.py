@@ -1,5 +1,5 @@
 import dataclasses
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import flax.nnx as nnx
 import jax
@@ -13,6 +13,7 @@ import openpi.shared.nnx_utils as nnx_utils
 
 if TYPE_CHECKING:
     from openpi.models.pi0 import Pi0
+    from openpi.models.pi0_diffusion import Pi0Diffusion
     from openpi.models.pi0_faster import Pi0Faster
 
 
@@ -106,6 +107,22 @@ class Pi0Config(_model.BaseModelConfig):
         if not filters:
             return nnx.Nothing
         return nnx.All(*filters)
+
+
+@dataclasses.dataclass(frozen=True)
+class Pi0DiffusionConfig(Pi0Config):
+    # Diffusion Policy style objective while reusing the Pi0/Pi0.5 Gemma action expert architecture.
+    num_diffusion_train_timesteps: int = 100
+    diffusion_prediction_type: Literal["epsilon", "sample", "v"] = "epsilon"
+    diffusion_schedule: Literal["cosine", "linear"] = "cosine"
+    diffusion_min_alpha_bar: float = 1e-4
+    diffusion_clip_sample: bool = False
+
+    @override
+    def create(self, rng: at.KeyArrayLike) -> "Pi0Diffusion":
+        from openpi.models.pi0_diffusion import Pi0Diffusion
+
+        return Pi0Diffusion(self, rngs=nnx.Rngs(rng))
 
 
 @dataclasses.dataclass(frozen=True)

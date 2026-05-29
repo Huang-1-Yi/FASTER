@@ -107,7 +107,7 @@ class ModelTransformFactory(GroupFactory):
     已在 config.py (line 110) 的 ModelTransformFactory.__call__ 里加了中文标注。
     标注内容覆盖了三个选项：
         PI0：原版 pi0，默认 Paligemma prompt tokenizer，只做输入侧 transform。
-        PI05：pi0.5 路径，Pi0FasterConfig 也走这里，重点标明了 FASTER 为什么不单独建 PI0_FASTER 分支。
+        PI05：pi0.5 路径，Pi0FasterConfig / Pi0DiffusionConfig 也走这里。
         PI0_FAST：FAST tokenizer 路径，标明了输入编码和输出 action 解码两部分。
     """
     # Data contract: 输入样本没有 "prompt" 时注入该默认 prompt，保证后续 tokenizer 总能拿到语言条件。
@@ -136,15 +136,14 @@ class ModelTransformFactory(GroupFactory):
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
                 )
-            # 选项 2: PI05 模型。FASTER 的 Pi0FasterConfig 也会走这个分支，因为它复用 PI05 数据格式。
+            # 选项 2: PI05 模型。FASTER / diffusion 配置也会走这个分支，因为它们复用 PI05 数据格式。
             case _model.ModelType.PI05:
                 # 这个分支需要读取 Pi0Config/Pi0FasterConfig 特有字段，例如 discrete_state_input/action_horizon。
                 assert isinstance(model_config, pi0_config.Pi0Config) or isinstance(
                     model_config, pi0_config.Pi0FasterConfig
                 )
-                # FASTER: Pi0FasterConfig.model_type 仍返回 PI05/PI0，因此复用常规 pi05/pi0 transform 路径，
-                # 不新增单独的 PI0_FASTER 分支。
-                # PI05/FASTER 都返回同一类输入 pipeline，只是在 token 和 horizon 配置上比 PI0 多一些控制项。
+                # FASTER / diffusion: model_type 仍返回 PI05/PI0，因此复用常规 pi05/pi0 transform 路径。
+                # 它们都返回连续 action chunk，不需要像 PI0_FAST 那样增加 action token 解码输出 transform。
                 return _transforms.Group(
                     # inputs 中 transform 按顺序执行；FASTER 的 action_prefix 也会随这些输入 transform 一起处理。
                     inputs=[
@@ -966,6 +965,75 @@ _CONFIGS = [
         num_train_steps=30_000,
         num_workers=8,
         freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_libero_diffusion",
+        # Diffusion objective version of pi05_libero: same PaliGemma + Gemma action expert architecture,
+        # but Pi0Diffusion.compute_loss/sample_actions use q-sample + DDIM instead of flow matching Euler updates.
+        model=pi0_config.Pi0DiffusionConfig(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            diffusion_prediction_type="epsilon",
+            diffusion_schedule="cosine",
+            num_diffusion_train_timesteps=100,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        num_workers=8,
+    ),
+    TrainConfig(
+        name="pi05_libero_diffusion_lora",
+        # 24GB 级别显存优先用这个配置做方案三 smoke test；它复用 pi05_libero 的 norm stats。
+        model=pi0_config.Pi0DiffusionConfig(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            diffusion_prediction_type="epsilon",
+            diffusion_schedule="cosine",
+            num_diffusion_train_timesteps=100,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            assets=AssetsConfig(assets_dir="./assets/pi05_libero", asset_id="physical-intelligence/libero"),
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        num_workers=8,
+        freeze_filter=pi0_config.Pi0DiffusionConfig(
             pi05=True,
             action_horizon=10,
             discrete_state_input=False,
