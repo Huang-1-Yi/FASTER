@@ -3,6 +3,7 @@ import enum
 import logging
 import socket
 
+import torch
 import tyro
 
 from openpi.policies import policy as _policy
@@ -49,6 +50,7 @@ class Args:
     port: int = 8000
     # 调试时记录 policy 行为。
     record: bool = False
+    max_cuda_mem_fraction: float = 0.9
     # FASTER: 使用 streaming server，动作在 denoising 过程中逐步发送。
     streaming: bool = False
     # FASTER: streaming 模式下，发出指定数量的 newly ready actions 后提前停止；None 表示跑完整推理。
@@ -125,7 +127,21 @@ def create_policy(args: Args) -> _policy.Policy:
             return create_default_policy(args.env, default_prompt=args.default_prompt)
 
 
+def _maybe_configure_cuda(args: Args) -> None:
+    if not torch.cuda.is_available():
+        return
+
+    try:
+        frac = max(0.0, min(1.0, args.max_cuda_mem_fraction))
+        for dev_idx in range(torch.cuda.device_count()):
+            torch.cuda.set_per_process_memory_fraction(frac, dev_idx)
+        logging.info("Set CUDA memory fraction to %.2f for %d device(s)", frac, torch.cuda.device_count())
+    except Exception as e:  # pragma: no cover - defensive
+        logging.warning("Failed to set CUDA memory fraction: %s", e)
+
+
 def main(args: Args) -> None:
+    _maybe_configure_cuda(args)
     if args.early_stop_actions is not None and not args.streaming:
         raise ValueError("--early-stop-actions can only be used with --streaming")
     if args.early_stop_actions is not None and args.early_stop_actions <= 0:

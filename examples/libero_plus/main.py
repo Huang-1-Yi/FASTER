@@ -1,0 +1,836 @@
+import collections
+import dataclasses
+import datetime as dt
+import hashlib
+import json
+import logging
+import math
+import os
+import pathlib
+import sys
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import imageio
+from libero.libero import benchmark
+from libero.libero import get_libero_path
+from libero.libero.envs import OffScreenRenderEnv
+import numpy as np
+from openpi_client import image_tools
+from openpi_client import websocket_client_policy as _websocket_client_policy
+import tqdm
+import tyro
+
+LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
+LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+DEFAULT_TASK_CLASSIFICATION_PATH = (
+    REPO_ROOT / "third_party" / "LIBERO-plus" / "libero" / "libero" / "benchmark" / "task_classification.json"
+)
+ALL_TASK_SUITE_NAMES = ("libero_spatial", "libero_object", "libero_goal", "libero_10")
+MAX_STEPS_BY_SUITE = {
+    "libero_spatial": 220,  # longest training demo has 193 steps
+    "libero_object": 280,  # longest training demo has 254 steps
+    "libero_goal": 300,  # longest training demo has 270 steps
+    "libero_10": 520,  # longest training demo has 505 steps
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class TaskClassificationSelection:
+    task_ids_0based: Set[int]
+    task_names: Set[str]
+
+    def matches(self, task_id: int, task_name: str) -> bool:
+        return task_id in self.task_ids_0based or task_name in self.task_names
+
+
+@dataclasses.dataclass
+class Args:
+    """Evaluation arguments."""
+
+    host: str = "0.0.0.0"
+    port: int = 8000
+    resize_size: int = 224
+    replan_steps: int = 5
+
+    task_suite_name: str = "libero_spatial"
+    category: Optional[str] = None
+    task_classification_path: Optional[str] = None
+    task_ids: Optional[str] = None
+    num_steps_wait: int = 10
+    num_trials_per_task: int = 1
+
+    video_out_path: str = "data/libero/videos"
+
+    seed: int = 7
+
+    results_json_path: str = "data/libero/results.json"
+
+    prompt_strip_trailing_id_with_prev: bool = True
+    prompt_strip_trailing_word_ending_with_digit: bool = True
+
+
+def _resolve_results_json_path(args: Args) -> str:
+    if args.category is None:
+        return args.results_json_path
+
+    base_path = pathlib.Path(args.results_json_path)
+    safe_category = args.category.replace(" ", "_").replace("/", "_")
+    return str(base_path.parent / f"{base_path.stem}_{safe_category}{base_path.suffix}")
+
+
+def _get_suite_names(task_suite_name: str) -> List[str]:
+    if task_suite_name == "all":
+        return list(ALL_TASK_SUITE_NAMES)
+    return [task_suite_name]
+
+
+def _resolve_task_classification_path(args: Args) -> pathlib.Path:
+    if args.task_classification_path:
+        return pathlib.Path(args.task_classification_path).expanduser()
+    return DEFAULT_TASK_CLASSIFICATION_PATH
+
+
+def _normalize_category_name(value: str) -> str:
+    return " ".join(str(value).strip().split()).casefold()
+
+
+def _load_classification_by_suite(args: Args, suite_names: List[str]) -> Dict[str, TaskClassificationSelection]:
+    if args.category is None:
+        return {}
+
+    classification_path = _resolve_task_classification_path(args)
+    try:
+        with open(classification_path, encoding="utf-8") as f:
+            classification = json.load(f)
+    except Exception as e:
+        logging.warning(
+            f"Failed to load task classification from {classification_path}: {e}. Proceeding without category filter."
+        )
+        return {}
+
+    requested_category = _normalize_category_name(args.category)
+    classification_by_suite: Dict[str, TaskClassificationSelection] = {}
+    for suite_name in suite_names:
+        suite_entries = classification.get(suite_name)
+        if suite_entries is None:
+            logging.warning(
+                "No task classification entries found for suite '%s' in %s. Category filter will be disabled for this suite.",
+                suite_name,
+                classification_path,
+            )
+            continue
+
+        matched_entries = [
+            entry
+            for entry in suite_entries
+            if _normalize_category_name(entry.get("category", "")) == requested_category
+        ]
+        task_ids_0based = {
+            int(entry["id"]) - 1
+            for entry in matched_entries
+            if isinstance(entry.get("id"), int) and int(entry["id"]) > 0
+        }
+        task_names = {str(entry["name"]) for entry in matched_entries if entry.get("name")}
+        classification_by_suite[suite_name] = TaskClassificationSelection(
+            task_ids_0based=task_ids_0based,
+            task_names=task_names,
+        )
+        logging.info(
+            "[%s] category '%s' matched %d classification entries.",
+            suite_name,
+            args.category,
+            len(matched_entries),
+        )
+
+    logging.info(f"Category filter enabled: '{args.category}'. Using classification at {classification_path}")
+    return classification_by_suite
+
+
+def _get_max_steps_for_suite(suite_name: str) -> int:
+    try:
+        return MAX_STEPS_BY_SUITE[suite_name]
+    except KeyError as exc:
+        raise ValueError(f"Unknown task suite: {suite_name}") from exc
+
+
+class ArtifactPaths:
+    @staticmethod
+    def _truncate_utf8(value: str, max_bytes: int) -> str:
+        if max_bytes <= 0:
+            return ""
+        encoded = value.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return value
+        out = []
+        total = 0
+        for ch in value:
+            b = ch.encode("utf-8")
+            if total + len(b) > max_bytes:
+                break
+            out.append(ch)
+            total += len(b)
+        return "".join(out)
+
+    @classmethod
+    def safe_video_filename(
+        cls,
+        task_description: str,
+        episode_index: int,
+        suffix: str,
+        *,
+        prefix: str = "rollout_",
+    ) -> str:
+        """Create a filename that stays within common filesystem limits."""
+        task_segment = task_description.replace(" ", "_")
+        base = f"{prefix}{task_segment}_ep{episode_index:02d}_{suffix}"
+        ext = ".mp4"
+        filename = f"{base}{ext}"
+
+        if len(filename.encode("utf-8")) <= 255:
+            return filename
+
+        hash_suffix = hashlib.sha1(base.encode("utf-8")).hexdigest()[:10]
+        reserved = len(f"_{hash_suffix}{ext}".encode())
+        max_base_bytes = 255 - reserved
+        base_short = cls._truncate_utf8(base, max_base_bytes)
+
+        if base_short:
+            return f"{base_short}_{hash_suffix}{ext}"
+        return f"{hash_suffix}{ext}"
+
+    @classmethod
+    def build(
+        cls,
+        base_dir: str,
+        task_description: str,
+        episode_index: int,
+        suffix: str,
+        *,
+        prefix: str,
+    ) -> pathlib.Path:
+        return pathlib.Path(base_dir) / cls.safe_video_filename(
+            task_description,
+            episode_index,
+            suffix,
+            prefix=prefix,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class EpisodeArtifacts:
+    rollout_video: pathlib.Path
+
+    @classmethod
+    def from_args(cls, args: Args, task_description: str, episode_index: int, suffix: str) -> "EpisodeArtifacts":
+        return cls(
+            rollout_video=ArtifactPaths.build(
+                args.video_out_path,
+                task_description,
+                episode_index,
+                suffix,
+                prefix="rollout_",
+            ),
+        )
+
+    @classmethod
+    def from_result(
+        cls,
+        args: Args,
+        task_description: str,
+        episode_index: int,
+        *,
+        success: bool,
+    ) -> "EpisodeArtifacts":
+        return cls.from_args(args, task_description, episode_index, "success" if success else "failure")
+
+    @staticmethod
+    def _write_video(path: pathlib.Path, frames, *, fps: int) -> pathlib.Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        imageio.mimwrite(path, [np.asarray(x) for x in frames], fps=fps)
+        return path
+
+    def write_rollout(self, frames, *, fps: int) -> pathlib.Path:
+        return self._write_video(self.rollout_video, frames, fps=fps)
+
+    @classmethod
+    def find_existing(
+        cls,
+        args: Args,
+        task_description: str,
+        episode_index: int,
+    ) -> Optional["ExistingEpisodeResult"]:
+        for success in (True, False):
+            artifacts = cls.from_result(args, task_description, episode_index, success=success)
+            if artifacts.rollout_video.exists():
+                return ExistingEpisodeResult(success=success, video_path=artifacts.rollout_video)
+        return None
+
+
+@dataclasses.dataclass(frozen=True)
+class ExistingEpisodeResult:
+    success: bool
+    video_path: pathlib.Path
+
+
+class PolicyIO:
+    @staticmethod
+    def quat2axisangle(quat):
+        """Convert a quaternion to axis-angle."""
+        if quat[3] > 1.0:
+            quat[3] = 1.0
+        elif quat[3] < -1.0:
+            quat[3] = -1.0
+
+        den = np.sqrt(1.0 - quat[3] * quat[3])
+        if math.isclose(den, 0.0):
+            return np.zeros(3)
+
+        return (quat[:3] * 2.0 * math.acos(quat[3])) / den
+
+    @classmethod
+    def build_input(
+        cls,
+        obs: Dict[str, Any],
+        img: np.ndarray,
+        wrist_img: np.ndarray,
+        prompt: str,
+    ) -> Dict[str, Any]:
+        return {
+            "observation/image": img,
+            "observation/wrist_image": wrist_img,
+            "observation/state": np.concatenate(
+                (
+                    obs["robot0_eef_pos"],
+                    cls.quat2axisangle(obs["robot0_eef_quat"]),
+                    obs["robot0_gripper_qpos"],
+                )
+            ),
+            "prompt": prompt,
+        }
+
+    @staticmethod
+    def prepare_images(obs: Dict[str, Any], resize_size: int) -> Tuple[np.ndarray, np.ndarray]:
+        img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
+        wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
+        img = image_tools.convert_to_uint8(image_tools.resize_with_pad(img, resize_size, resize_size))
+        wrist_img = image_tools.convert_to_uint8(image_tools.resize_with_pad(wrist_img, resize_size, resize_size))
+        return img, wrist_img
+
+
+def _planned_actions(response: Dict[str, Any], replan_steps: int):
+    action_chunk = response["actions"]
+    if len(action_chunk) < replan_steps:
+        raise RuntimeError(
+            f"We want to replan every {replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
+        )
+    return action_chunk[:replan_steps]
+
+
+def _episode_extra(
+    args: Args, suite_name: str, max_steps: int, model_prompt: str, *, skipped: bool = False
+) -> Dict[str, Any]:
+    extra: Dict[str, Any] = {
+        "max_steps": max_steps,
+        "num_steps_wait": args.num_steps_wait,
+        "suite": suite_name,
+        "prompt_sent": model_prompt,
+    }
+    if skipped:
+        extra["skipped"] = True
+    return extra
+
+
+@dataclasses.dataclass
+class EpisodeFrameCollector:
+    replay_images: List[np.ndarray] = dataclasses.field(default_factory=list)
+
+    def append_step(self, img: np.ndarray) -> None:
+        self.replay_images.append(img)
+
+    def write_artifacts(self, artifacts: EpisodeArtifacts) -> pathlib.Path:
+        return artifacts.write_rollout(self.replay_images, fps=10)
+
+
+@dataclasses.dataclass
+class RunStats:
+    episodes: int = 0
+    successes: int = 0
+
+    def record(self, *, success: bool) -> None:
+        self.episodes += 1
+        if success:
+            self.successes += 1
+
+    @property
+    def rate(self) -> float:
+        if self.episodes == 0:
+            return 0.0
+        return float(self.successes) / float(self.episodes)
+
+
+@dataclasses.dataclass(frozen=True)
+class EpisodeRunResult:
+    success: bool
+    steps_taken: int
+    video_path: pathlib.Path
+    last_error: Optional[str] = None
+
+
+class EpisodeRunner:
+    def __init__(
+        self,
+        args: Args,
+        client,
+        env,
+        *,
+        task_id: int,
+        task_description: str,
+        initial_states,
+        model_prompt: str,
+        max_steps: int,
+    ):
+        self.args = args
+        self.client = client
+        self.env = env
+        self.task_id = task_id
+        self.task_description = task_description
+        self.initial_states = initial_states
+        self.model_prompt = model_prompt
+        self.max_steps = max_steps
+
+    def _episode_seed(self, episode_idx: int) -> int:
+        return int(self.args.seed + 1000 * int(self.task_id) + int(episode_idx))
+
+    def _reset_episode(self, episode_idx: int):
+        if len(self.initial_states) == 0:
+            raise RuntimeError(f"No initial states for task {self.task_id}")
+
+        episode_seed = self._episode_seed(episode_idx)
+        self.env.seed(episode_seed)
+        self.env.reset()
+
+        rng = np.random.RandomState(episode_seed)
+        init_idx = int(rng.randint(len(self.initial_states)))
+        return self.env.set_init_state(self.initial_states[init_idx])
+
+    def _infer_actions(self, obs: Dict[str, Any], img: np.ndarray, wrist_img: np.ndarray) -> Dict[str, Any]:
+        element = PolicyIO.build_input(obs, img, wrist_img, self.model_prompt)
+        return self.client.infer(element)
+
+    def run(self, episode_idx: int) -> EpisodeRunResult:
+        obs = self._reset_episode(episode_idx)
+        action_plan = collections.deque()
+        frame_collector = EpisodeFrameCollector()
+        done = False
+        last_error = None
+        t = 0
+
+        while t < self.max_steps + self.args.num_steps_wait:
+            try:
+                if t < self.args.num_steps_wait:
+                    obs, _, done, _ = self.env.step(LIBERO_DUMMY_ACTION)
+                    t += 1
+                    continue
+
+                img, wrist_img = PolicyIO.prepare_images(obs, self.args.resize_size)
+
+                if not action_plan:
+                    if t == self.args.num_steps_wait:
+                        logging.info(f"[DEBUG] Sending prompt to model: '{self.model_prompt}'")
+
+                    response = self._infer_actions(obs, img, wrist_img)
+                    action_plan.extend(_planned_actions(response, self.args.replan_steps))
+
+                action = action_plan.popleft()
+                frame_collector.append_step(img)
+                obs, _, done, _ = self.env.step(action.tolist())
+                if done:
+                    break
+                t += 1
+
+            except Exception as e:
+                last_error = f"{type(e).__name__}: {e}"
+                logging.error(f"Caught exception: {e}")
+                break
+
+        artifacts = EpisodeArtifacts.from_result(
+            self.args,
+            self.task_description,
+            episode_idx,
+            success=done,
+        )
+        video_path = frame_collector.write_artifacts(artifacts)
+        return EpisodeRunResult(
+            success=bool(done),
+            steps_taken=t,
+            video_path=video_path,
+            last_error=last_error,
+        )
+
+
+def _parse_task_ids(expr: Optional[str], upper: int) -> List[int]:
+    """
+    Parse expressions like "5", "10-20", "0,7,10-12" into a sorted, de-duplicated
+    list of integer task ids within [0, upper-1]. Ranges are inclusive.
+    """
+    if expr is None or str(expr).strip() == "":
+        return list(range(upper))
+    s = str(expr).replace(" ", "")
+    out: Set[int] = set()
+    parts = [p for p in s.split(",") if p != ""]
+    for part in parts:
+        if "-" in part:
+            a, b = part.split("-", 1)
+            try:
+                start = int(a)
+                end = int(b)
+            except ValueError as exc:
+                raise ValueError(f'Invalid range "{part}" in --task-ids.') from exc
+            if start > end:
+                start, end = end, start
+            for i in range(start, end + 1):
+                if 0 <= i < upper:
+                    out.add(i)
+                else:
+                    raise ValueError(f"Task id {i} out of range [0, {upper - 1}] for suite (from range {part}).")
+        else:
+            try:
+                i = int(part)
+            except ValueError as exc:
+                raise ValueError(f'Invalid id "{part}" in --task-ids.') from exc
+            if 0 <= i < upper:
+                out.add(i)
+            else:
+                raise ValueError(f"Task id {i} out of range [0, {upper - 1}] for suite.")
+    return sorted(out)
+
+
+def _prompt_for_model(args: Args, task_description: str) -> str:
+    """Return the prompt string actually sent to the model (may be normalized)."""
+    prompt = str(task_description).strip()
+    if not prompt:
+        return prompt
+
+    tokens = [t for t in prompt.split() if t]
+    while tokens:
+        last = tokens[-1]
+
+        if args.prompt_strip_trailing_id_with_prev and last.isdigit():
+            tokens = tokens[:-2] if len(tokens) >= 2 else tokens[:-1]
+            continue
+
+        if args.prompt_strip_trailing_word_ending_with_digit and last[-1].isdigit():
+            tokens = tokens[:-1]
+            continue
+
+        break
+
+    return " ".join(tokens).strip()
+
+
+class ResultsStore:
+    def __init__(self, args: Args):
+        self.args = args
+        self.path = pathlib.Path(args.results_json_path)
+
+    @staticmethod
+    def _default_data() -> Dict[str, Any]:
+        return {
+            "meta": {},
+            "success": [],
+            "failure": [],
+            "running_counts": {
+                "total_episodes": 0,
+                "total_successes": 0,
+                "success_rate": 0.0,
+            },
+        }
+
+    @staticmethod
+    def _atomic_write_json(obj: Dict[str, Any], path: pathlib.Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        tmp_path = path.parent / f".{path.name}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(obj, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+
+            if os.path.exists(path):
+                os.replace(tmp_path, path)
+            else:
+                tmp_path.rename(path)
+        except Exception as e:
+            if tmp_path.exists():
+                tmp_path.unlink()
+            raise e
+
+    def _read_json(self) -> Dict[str, Any]:
+        if not self.path.exists():
+            return self._default_data()
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return self._default_data()
+
+    def initialize(self, selected) -> pathlib.Path:
+        now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+        data = self._read_json()
+        meta = data.setdefault("meta", {})
+        meta.setdefault("created_at", now_iso)
+        meta.update(
+            {
+                "updated_at": now_iso,
+                "task_suite_name": self.args.task_suite_name,
+                "selected_task_ids": selected,
+                "host": self.args.host,
+                "port": self.args.port,
+                "resize_size": self.args.resize_size,
+                "replan_steps": self.args.replan_steps,
+                "num_trials_per_task": self.args.num_trials_per_task,
+                "seed": self.args.seed,
+                "video_out_path": str(self.args.video_out_path),
+            }
+        )
+
+        data.setdefault("success", [])
+        data.setdefault("failure", [])
+        data.setdefault(
+            "running_counts",
+            {"total_episodes": 0, "total_successes": 0, "success_rate": 0.0},
+        )
+        self._atomic_write_json(data, self.path)
+        return self.path
+
+    def record_episode(
+        self,
+        *,
+        task_id: int,
+        task_description: str,
+        episode_index: int,
+        steps_taken: int,
+        success: bool,
+        video_path: pathlib.Path,
+        error: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        data = self._read_json()
+
+        bucket = "success" if success else "failure"
+        for existing_record in data.get(bucket, []):
+            if (
+                existing_record.get("task_id") == task_id
+                and existing_record.get("episode_index") == episode_index
+                and existing_record.get("task_description") == task_description
+            ):
+                return
+
+        record: Dict[str, Any] = {
+            "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "task_id": int(task_id),
+            "task_description": str(task_description),
+            "episode_index": int(episode_index),
+            "steps_taken": int(steps_taken),
+            "video": str(video_path),
+        }
+        if error:
+            record["error"] = str(error)
+        if extra:
+            record["extra"] = extra
+
+        data.setdefault(bucket, []).append(record)
+
+        rc = data.setdefault(
+            "running_counts",
+            {"total_episodes": 0, "total_successes": 0, "success_rate": 0.0},
+        )
+        rc["total_episodes"] = int(rc.get("total_episodes", 0)) + 1
+        if success:
+            rc["total_successes"] = int(rc.get("total_successes", 0)) + 1
+        total = max(1, rc["total_episodes"])
+        rc["success_rate"] = float(rc["total_successes"]) / float(total)
+
+        data.setdefault("meta", {})
+        data["meta"]["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        self._atomic_write_json(data, self.path)
+
+
+def _prepare_output_dirs(args: Args) -> None:
+    pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
+
+
+def _select_task_ids_for_suite(
+    args: Args,
+    suite_name: str,
+    task_suite,
+    classification_by_suite: Dict[str, TaskClassificationSelection],
+) -> List[int]:
+    num_tasks_in_suite = task_suite.n_tasks
+    selected_task_ids = _parse_task_ids(args.task_ids, num_tasks_in_suite)
+    classification_selection = classification_by_suite.get(suite_name)
+
+    if classification_selection is None:
+        return selected_task_ids
+
+    invalid_ids = {tid for tid in classification_selection.task_ids_0based if tid < 0 or tid >= num_tasks_in_suite}
+    if invalid_ids:
+        logging.warning(
+            "[%s] classification contains %d out-of-range task ids for current suite size %d. "
+            "This usually means the loaded LIBERO suite does not match %s.",
+            suite_name,
+            len(invalid_ids),
+            num_tasks_in_suite,
+            _resolve_task_classification_path(args),
+        )
+
+    return [tid for tid in selected_task_ids if classification_selection.matches(tid, task_suite.get_task(tid).name)]
+
+
+def eval_libero(args: Args) -> None:
+    if args.category is not None:
+        args.results_json_path = _resolve_results_json_path(args)
+        logging.info(f"Category-specific results will be saved to: {args.results_json_path}")
+
+    np.random.seed(args.seed)
+
+    benchmark_dict = benchmark.get_benchmark_dict()
+    suite_names = _get_suite_names(args.task_suite_name)
+    _prepare_output_dirs(args)
+    classification_by_suite = _load_classification_by_suite(args, suite_names)
+    client = _websocket_client_policy.WebsocketClientPolicy(args.host, args.port)
+    results_store = ResultsStore(args)
+
+    selected_map: Dict[str, List[int]] = {}
+    overall_stats = RunStats()
+
+    for suite_name in suite_names:
+        key = suite_name.lower()
+        if key not in benchmark_dict:
+            available = sorted(benchmark_dict.keys())
+            raise ValueError(
+                f"Unknown task suite: {suite_name}. "
+                f"Available suites in your installed `libero` are: {available}. "
+                "Note: LIBERO-Plus supports `libero_spatial`, `libero_object`, `libero_goal`, and `libero_10`. "
+                "Double-check (1) your `PYTHONPATH` points to the intended LIBERO/LIBERO-plus checkout, "
+                "and (2) the suite names you pass to the evaluator match `benchmark.get_benchmark_dict()`."
+            )
+
+        task_suite = benchmark_dict[key]()
+        num_tasks_in_suite = task_suite.n_tasks
+        max_steps = _get_max_steps_for_suite(suite_name)
+        selected_task_ids = _parse_task_ids(args.task_ids, num_tasks_in_suite)
+        filtered_task_ids = _select_task_ids_for_suite(args, suite_name, task_suite, classification_by_suite)
+
+        selected_map[suite_name] = filtered_task_ids
+
+        logging.info(
+            f"Evaluating suite: {suite_name} | tasks: {num_tasks_in_suite} | "
+            f"category: {args.category or 'ALL'} | selected ids: {filtered_task_ids[:10]}"
+            f"{' ...' if len(filtered_task_ids) > 10 else ''}"
+        )
+        logging.info(f"[{suite_name}] category matched: {len(filtered_task_ids)}/{len(selected_task_ids)}")
+
+        results_store.initialize(selected_map)
+        suite_stats = RunStats()
+
+        for task_id in tqdm.tqdm(filtered_task_ids, total=len(filtered_task_ids)):
+            task = task_suite.get_task(task_id)
+            initial_states = task_suite.get_task_init_states(task_id)
+            env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
+            try:
+                model_prompt = _prompt_for_model(args, task_description)
+                logging.info(f"[DEBUG] Task {task_id} description: '{task_description}'")
+                if model_prompt != str(task_description):
+                    logging.info(
+                        f"[DEBUG] Normalized prompt (sent to model): '{model_prompt}' (from: '{task_description}')"
+                    )
+
+                episode_runner = EpisodeRunner(
+                    args,
+                    client,
+                    env,
+                    task_id=task_id,
+                    task_description=task_description,
+                    initial_states=initial_states,
+                    model_prompt=model_prompt,
+                    max_steps=max_steps,
+                )
+
+                for episode_idx in tqdm.tqdm(range(args.num_trials_per_task), desc=f"episodes for task {task_id}"):
+                    existing = EpisodeArtifacts.find_existing(args, task_description, episode_idx)
+                    if existing is not None:
+                        status = "SUCCESS" if existing.success else "FAILURE"
+                        logging.info(f"⏭️  Skipping task {task_id} episode {episode_idx}: already completed ({status})")
+                        suite_stats.record(success=existing.success)
+                        overall_stats.record(success=existing.success)
+                        results_store.record_episode(
+                            task_id=task_id,
+                            task_description=task_description,
+                            episode_index=episode_idx,
+                            steps_taken=-1,
+                            success=existing.success,
+                            video_path=existing.video_path,
+                            error=None,
+                            extra=_episode_extra(args, suite_name, max_steps, model_prompt, skipped=True),
+                        )
+                        continue
+
+                    logging.info(f"\nTask: {task_description} | episode {episode_idx + 1}/{args.num_trials_per_task}")
+                    logging.info(f"Starting episode {episode_idx + 1}...")
+                    result = episode_runner.run(episode_idx)
+                    suite_stats.record(success=result.success)
+                    overall_stats.record(success=result.success)
+
+                    logging.info(f"Success: {result.success}")
+                    logging.info(f"# episodes completed so far: {overall_stats.episodes}")
+                    logging.info(f"# successes: {overall_stats.successes} ({overall_stats.rate * 100:.1f}%)")
+
+                    results_store.record_episode(
+                        task_id=task_id,
+                        task_description=task_description,
+                        episode_index=episode_idx,
+                        steps_taken=result.steps_taken,
+                        success=result.success,
+                        video_path=result.video_path,
+                        error=result.last_error,
+                        extra=_episode_extra(args, suite_name, max_steps, model_prompt),
+                    )
+            finally:
+                close_fn = getattr(env, "close", None)
+                if callable(close_fn):
+                    close_fn()
+
+        logging.info(f"[Suite {suite_name}] success rate: {suite_stats.rate}")
+        logging.info(f"[Suite {suite_name}] overall success rate: {overall_stats.rate}")
+
+    logging.info(f"Total success rate: {overall_stats.rate}")
+    logging.info(f"Total episodes: {overall_stats.episodes}")
+
+
+def _get_libero_env(task, resolution, seed):
+    """Create the LIBERO environment and return it with the task description."""
+    task_description = task.language
+    task_bddl_file = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
+    env_args = {"bddl_file_name": str(task_bddl_file), "camera_heights": resolution, "camera_widths": resolution}
+    env = OffScreenRenderEnv(**env_args)
+    env.seed(seed)
+    return env, task_description
+
+
+def _normalize_cli_args(argv: List[str]) -> List[str]:
+    """Accept both current `--flag` and legacy `--args.flag` spellings."""
+    normalized = []
+    for arg in argv:
+        if arg.startswith("--args."):
+            normalized.append("--" + arg[len("--args.") :])
+        else:
+            normalized.append(arg)
+    return normalized
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    eval_libero(tyro.cli(Args, args=_normalize_cli_args(sys.argv[1:])))
